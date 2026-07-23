@@ -33,7 +33,7 @@
 ### 0.3 先建立這一條主線
 
 ```mermaid
-flowchart LR
+flowchart TD
     A[CPU Reset] --> B[SEC<br/>建立最小執行環境]
     B --> C[PEI<br/>初始化 DRAM]
     C --> D[DXE<br/>建立服務並載入 Driver]
