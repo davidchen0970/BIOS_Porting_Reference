@@ -10,35 +10,38 @@
 
 ### 0.1 UEFI、PI、EDK II 是什麼？
 
-| 名詞 | 一句話解釋 | 白話理解 |
+| 名詞 | 解釋 | 白話理解 |
 | --- | --- | --- |
 | UEFI（Unified Extensible Firmware Interface，統一可延伸韌體介面） | 定義韌體、UEFI 程式與 OS Loader 之間的標準介面 | 開機期間大家共同遵守的溝通規則 |
 | PI（Platform Initialization，平台初始化） | 定義韌體內部如何分階段完成平台初始化 | 韌體內部的施工流程與交接規則 |
 | EDK II（EFI Development Kit II） | UEFI／PI 的開源參考實作與建置框架 | 可閱讀、建置及移植的參考工程，不等同規格本身 |
 
-一句話區分：PI 處理「平台如何被帶起來」，UEFI 處理「平台帶起來後，韌體如何向 Driver、Application 與 OS Loader 提供一致介面」，EDK II 則提供其中一種可工作的參考實作。
+區分：PI 處理「平台如何被帶起來」，UEFI 處理「平台帶起來後，韌體如何向 Driver、Application 與 OS Loader 提供一致介面」，EDK II 則提供其中一種可工作的參考實作。
 
 ### 0.2 最重要的五個階段
 
-| 階段 | 一句話解釋 | 此階段主要完成什麼 | 失敗時常見外觀 |
-| --- | --- | --- | --- |
-| SEC（Security Phase，安全階段） | 剛離開 Reset，先建立最小執行環境 | Temporary RAM、Stack、早期 CPU 與 Debug 環境 | 無 Serial、最早期 POST Code、持續 Reset |
-| PEI（Pre-EFI Initialization，EFI 前置初始化） | 把永久記憶體準備好 | CPU／Silicon／Board 早期初始化、DRAM Training、HOB | Memory Training 失敗、Memory Discovered 後停住 |
-| DXE（Driver Execution Environment，驅動程式執行環境） | 建立完整 UEFI 服務並載入 Driver | Protocol、Handle、Memory Service、裝置 Driver | Driver 未派送、裝置或 Protocol 缺失 |
-| BDS（Boot Device Selection，開機裝置選擇） | 依政策選擇從哪裡開機 | Console、Boot Option、Recovery、OS Loader | 找不到 Boot Device、BootOrder 異常 |
-| Runtime（執行期） | OS 接管後仍保留少量韌體服務 | Variable、Time、Reset、Capsule 等服務 | OS 開機後 Runtime Crash、Variable 或 Reset 異常 |
+| 階段 | 解釋 | 失敗時常見外觀 |
+| --- | --- | --- |
+| SEC | 建立最小執行環境，準備進入 PEI | 無 Serial、最早期 POST Code、持續 Reset |
+| PEI | 初始化 DRAM，建立永久記憶體 | Memory Training 失敗、Memory Discovered 後停住 |
+| DXE | 建立 UEFI 服務並載入 Driver | Driver 未派送、裝置或 Protocol 缺失 |
+| BDS | 依平台政策選擇 OS Loader | 找不到 Boot Device、BootOrder 異常 |
+| Runtime | OS 接管後保留少量韌體服務 | Variable、Reset 或 Runtime Service 異常 |
 
-### 0.3 先記住這一條主線
+> 各階段「主要完成什麼」與「如何判斷是否完成」，詳見第 4.1 至 4.5 節。
 
-```text
-Reset
-  -> SEC：先讓程式能跑
-  -> PEI：把 DRAM 準備好
-  -> DXE：把服務與裝置 Driver 建起來
-  -> BDS：選擇 OS Loader
-  -> ExitBootServices：OS 接管
-  -> Runtime：只保留規格允許的韌體服務
+### 0.3 先建立這一條主線
+
+```mermaid
+flowchart LR
+    A[CPU Reset] --> B[SEC<br/>建立最小執行環境]
+    B --> C[PEI<br/>初始化 DRAM]
+    C --> D[DXE<br/>建立服務並載入 Driver]
+    D --> E[BDS<br/>選擇開機裝置]
+    E --> F[OS Loader<br/>載入作業系統]
+    F --> G[Runtime<br/>保留少量韌體服務]
 ```
+
 
 ### 0.4 為什麼一定要先判斷階段？
 
@@ -56,11 +59,13 @@ Reset
 
 第一次閱讀時，可先依下列順序：
 
-1. 讀完本節，先記住五個階段。
+1. 讀完本節，先掌握五個階段的角色。
 2. 閱讀第 4 節開頭的「階段地圖與關鍵交接點」。
 3. 依序閱讀 SEC、PEI、DXE、BDS、Runtime。
 4. 再讀第 6 節，理解 PPI、Protocol、HOB、Event 與 Handle。
 5. 最後閱讀 `ExitBootServices()`、Debug、測試與常見問題。
+
+---
 
 ## 1. 文件目的
 
@@ -101,7 +106,11 @@ Reset
 - 開機效能、驗證、安全與現場問題分析人員
 - 需要閱讀 EDK II 原始碼、Serial Log、POST Code 或 Build Report 的開發者
 
+---
+
 ## 2. 建議先備知識
+
+> 如果你對下列名詞還不熟悉，可以先閱讀第 0 節，再回頭查看這份清單。本章的流程圖、階段地圖與故障外觀也能協助你先建立整體概念，再逐步補齊技術細節。
 
 閱讀本章前，建議具備下列基礎：
 
@@ -112,6 +121,8 @@ Reset
 - EDK II Package、INF、DSC、DEC、FDF 的基本用途
 
 不熟悉上述項目時，仍可先閱讀本章的流程圖，再回到各專題章節補充細節。
+
+---
 
 ## 3. UEFI 與 PI 規格的定位及邊界
 
@@ -167,6 +178,16 @@ EDK II 提供 UEFI／PI 的開源參考實作、建置系統、Library Class、P
 | PI Foundation 層 | 建立早期執行環境、派送模組並管理階段交接 | PEI Core、DXE Core、PPI Database、HOB List、DXE Dispatcher |
 | Platform／Silicon 層 | 初始化 CPU、Memory、SoC、Chipset、Board 與產品 Policy | PEIM、DXE Driver、Library、Silicon Policy、Board Configuration |
 
+```mermaid
+flowchart BT
+    C[Platform／Silicon 層<br/>PEIM、DXE Driver<br/>Silicon Policy、Board Configuration]
+    B[PI Foundation 層<br/>PEI Core、DXE Core<br/>PPI Database、HOB List、DXE Dispatcher]
+    A[UEFI 介面層<br/>System Table、Boot／Runtime Services<br/>Protocol、Device Path]
+
+    C -->|提供硬體初始化與平台 Policy| B
+    B -->|建立服務框架與標準介面| A
+```
+
 ### 3.5 `EFI_SYSTEM_TABLE`：UEFI 執行環境的核心入口
 
 UEFI Image 的 Entry Point 會接收 `ImageHandle` 與 `EFI_SYSTEM_TABLE *SystemTable`。EDK II 常透過 `UefiBootServicesTableLib`、`UefiRuntimeServicesTableLib` 與 `UefiLib` 將常用指標整理為 `gBS`、`gRT`、`gST`，但這些全域名稱屬於 Library 提供的便利介面，不是 UEFI 規格要求的固定變數名稱。
@@ -182,7 +203,20 @@ UEFI Image 的 Entry Point 會接收 `ImageHandle` 與 `EFI_SYSTEM_TABLE *System
 
 此外，System Table 也包含 Firmware Vendor／Revision、Console Handle 與自身 Header。Protocol 的一般探索仍透過 Boot Services 與 Handle Database 完成，不能把 System Table 理解成「存放所有 Protocol 的容器」。
 
+```mermaid
+flowchart TD
+    ST[EFI_SYSTEM_TABLE]
+    ST --> BS[Boot Services]
+    ST --> RT[Runtime Services]
+    ST --> CI[ConIn／ConOut／StdErr]
+    ST --> CT[Configuration Table<br/>ACPI／SMBIOS／FDT]
+
+    BS --> BS1[Memory／Protocol／Event／Image]
+    RT --> RT1[Variable／Time／Reset／Capsule]
+```
+
 常見存取方式如下：
+
 
 ```c
 EFI_STATUS
@@ -204,23 +238,25 @@ UefiMain (
 
 閱讀 `gST->ConOut`、`gBS->LocateProtocol()` 或 `gRT->GetVariable()` 時，可先判斷它分別屬於 Console Protocol、Boot Services 或 Runtime Services，再確認該服務在目前階段是否仍有效。
 
+---
+
 ## 4. SEC、PEI、DXE、BDS 與 Runtime 的生命週期
 
 ### 4.0 先看整張地圖：階段與交接點
 
-進入細節前，先用「本階段要完成什麼、交給下一階段什麼」理解流程：
+進入細節前，先確認每個交接點的成功標誌與失敗外觀：
 
-| 交接點 | 這一段要完成什麼 | 交給下一階段的主要內容 | 失敗時常見外觀 |
-| --- | --- | --- | --- |
-| Reset → SEC | 進入韌體入口並建立最小執行條件 | CPU 初始狀態、Flash Mapping、早期平台資訊 | 無 POST、無 Serial、持續 Reset |
-| SEC → PEI | 建立 Temporary RAM 與 Stack，找到 PEI Core | SEC Platform Information、初始 Firmware Volume | SEC 有活動，但 PEI 沒有輸出 |
-| PEI 暫存記憶體 → 永久記憶體 | 完成 DRAM Training 與 Memory Migration | 可用 DRAM、遷移後的 PPI／HOB／Stack | Memory Discovered 後停住 |
-| PEI → DXE | 完成 DXE 所需的最小平台初始化 | HOB List、Resource、Memory、FV 與 CPU 資訊 | DXE IPL 或 DXE Core 最早期停住 |
-| DXE → BDS | 建立 UEFI Service、Protocol、Handle 與必要裝置 | Console、Boot Device、Boot Variable、System Table | 無 Console、無 Boot Option、裝置缺失 |
-| BDS → OS Loader | 選定 Boot Option 並載入 OS Loader | Device Path、Loaded Image、UEFI System Table | 找不到媒體、Security Violation |
-| OS Loader → OS | 提供最新 Memory Map 並結束 Boot Services | ACPI、SMBIOS、Runtime Memory 與 Runtime Services | `ExitBootServices()` 失敗、OS 早期 Crash |
+| 交接點 | 成功標誌 | 失敗時常見外觀 |
+| --- | --- | --- |
+| Reset → SEC | CPU 開始讀取韌體，早期觀測點出現 | 無 POST、無 Serial、持續 Reset |
+| SEC → PEI | Temporary RAM、Stack、PEI Core 可用 | SEC 有活動，但 PEI 沒有輸出 |
+| 暫存記憶體 → 永久記憶體 | DRAM Training 與 Memory Migration 完成 | Memory Discovered 後停住 |
+| PEI → DXE | HOB List 完整，DXE Core 可載入 | DXE IPL 或 DXE Core 最早期停住 |
+| DXE → BDS | UEFI Service、Console、Boot Device 基礎完成 | 無 Console、無 Boot Option、裝置缺失 |
+| BDS → OS Loader | Boot Option 可解析，OS Loader 可啟動 | 找不到媒體、Security Violation |
+| OS Loader → OS | `ExitBootServices()` 成功 | OS 早期 Crash、Runtime 交接異常 |
 
-看表格時，先問三件事：
+使用這張表時，依序確認：
 
 1. 最後看見的 Log 或 POST Code 屬於哪個階段？
 2. 下一個交接點需要哪些必要條件？
@@ -228,7 +264,7 @@ UefiMain (
 
 ### 4.1 SEC：建立最小可信執行環境
 
-> 一句話總結：DRAM 還不能正常使用時，SEC 先建立 Temporary RAM、Stack 與進入 PEI 的最低條件。
+> 總結：DRAM 還不能正常使用時，SEC 先建立 Temporary RAM、Stack 與進入 PEI 的最低條件。
 
 SEC 是處理器離開 Reset 後最早可辨識的 PI 階段。平台在此時通常尚未有可正常使用的 DRAM，因此 SEC 的核心任務是建立足以進入 PEI 的最小環境。
 
@@ -260,16 +296,18 @@ SEC 不宜承擔大型裝置初始化。此階段可用資源最少，錯誤處�
 - SEC Platform Information
 - 初始 Firmware Volume Base
 
-#### 新手最常問：如何知道 SEC 有沒有開始執行？
+<details>
+<summary>新手最常問：如何知道 SEC 有沒有開始執行？</summary>
 
 - 先確認平台是否有最早期 POST Code、GPIO Toggle 或 Serial Byte。
 - 量測 SPI Flash CS／CLK，確認 CPU 是否嘗試讀取開機映像。
 - 若有 JTAG／Trace，確認 Program Counter 是否離開 Reset Vector。
 - POST Code 數值由平台定義，不能直接假設某個固定數值一定代表 SEC。
 
+</details>
 ### 4.2 PEI：建立永久記憶體並描述平台狀態
 
-> 一句話總結：PEI 的首要任務是把 DRAM 準備好，並用 HOB 告訴 DXE「平台目前有哪些資源」。
+> 總結：PEI 的首要任務是把 DRAM 準備好，並用 HOB 告訴 DXE「平台目前有哪些資源」。
 
 PEI 的主要目標是完成足以啟動 DXE 的最小平台初始化，其中最重要的里程碑是 DRAM 可用。
 
@@ -298,16 +336,18 @@ PEI 通常不是完整裝置驅動環境。此階段應聚焦於 DXE 所需的�
 - HOB List 完整到足以描述 DXE 輸入
 - DXE Core Image 可定位、驗證並載入
 
-#### 新手最常問：如何知道 PEI 是否完成？
+<details>
+<summary>新手最常問：如何知道 PEI 是否完成？</summary>
 
 - Serial Log 已跨過 Memory Training，並看見 Memory Discovered 相關訊息。
 - HOB List 已包含可用記憶體與必要 Firmware Volume。
 - DXE IPL 已找到並準備載入 DXE Core。
 - 若 Memory Discovered 後立即停住，優先檢查 Memory Migration、HOB 與舊 Temporary RAM 指標。
 
+</details>
 ### 4.3 DXE：建立完整 UEFI Driver 與服務環境
 
-> 一句話總結：DXE 建立 UEFI 的主要服務框架，載入 Driver，並把控制器轉成可供開機流程使用的裝置介面。
+> 總結：DXE 建立 UEFI 的主要服務框架，載入 Driver，並把控制器轉成可供開機流程使用的裝置介面。
 
 DXE 階段開始時，永久記憶體已可用。DXE Core 接收 HOB List，建立記憶體服務、Handle Database、Protocol Database、Event 與 DXE Dispatcher，接著派送 DXE Driver。
 
@@ -324,16 +364,18 @@ DXE 階段開始時，永久記憶體已可用。DXE Core 接收 HOB List，建�
 
 DXE 的執行順序不是單純依 FDF 檔案排列。Dispatcher 會根據 Driver 的 Dependency Expression、已安裝的 Protocol、Apriori File 及平台 Policy 決定何時派送。某個 Driver 已被載入，不代表其所管理的 Controller 已完成連接；UEFI Driver Model 的 `Supported()`、`Start()` 與 `ConnectController()` 仍可能在稍後執行。
 
-#### 新手最常問：Driver 有 Entry Log，為何裝置仍不存在？
+<details>
+<summary>新手最常問：Driver 有 Entry Log，為何裝置仍不存在？</summary>
 
 - Entry Point 多半只代表 Driver 已安裝 Driver Binding Protocol。
 - 接著仍需 `ConnectController()` 觸發 `Supported()` 與 `Start()`。
 - Bus Driver 還需要建立 Child Handle、Device Path 與 I/O Protocol。
 - 因此應同時檢查 Dispatch 與 Connect，不要只看 Driver 是否被載入。
 
+</details>
 ### 4.4 BDS：套用平台開機政策並選擇 OS Loader
 
-> 一句話總結：BDS 不再負責建立底層硬體，而是決定「從哪裡、以什麼政策啟動哪一個 OS Loader」。
+> 總結：BDS 不再負責建立底層硬體，而是決定「從哪裡、以什麼政策啟動哪一個 OS Loader」。
 
 BDS 可視為 DXE 後段的開機政策階段。它使用既有 Boot Services 與 Protocol 完成 Console、Boot Option 與 OS Loader 的選擇。
 
@@ -349,16 +391,18 @@ BDS 可視為 DXE 後段的開機政策階段。它使用既有 Boot Services �
 
 BDS 找到 OS Loader 後，不會立即失去控制權。OS Loader 仍在 Boot Services 環境中執行，並可能取得 Memory Map、載入核心與驅動、準備 ACPI／SMBIOS 資料，最後才呼叫 `ExitBootServices()`。
 
-#### 新手最常問：找到磁碟，為何還是不能開機？
+<details>
+<summary>新手最常問：找到磁碟，為何還是不能開機？</summary>
 
 - 找到 Controller 不等於找到可開機的檔案系統。
 - 找到檔案系統不等於 `Boot####` 的 Device Path 正確。
 - 找到 OS Loader 後，仍可能因 Secure Boot、映像格式或載入參數失敗。
 - 應分別確認裝置、Partition、File System、Boot Option 與 Image 驗證。
 
+</details>
 ### 4.5 Runtime：OS 接管後仍保留的韌體服務
 
-> 一句話總結：OS 接管後，大多數 UEFI 功能結束，只留下 Variable、Time、Reset、Capsule 等少量 Runtime Services。
+> 總結：OS 接管後，大多數 UEFI 功能結束，只留下 Variable、Time、Reset、Capsule 等少量 Runtime Services。
 
 `ExitBootServices()` 成功後，大部分韌體開機服務終止，作業系統接管一般記憶體、裝置與中斷管理。只有標示為 Runtime 的程式與資料，以及 UEFI 規格定義的 Runtime Services，可以在 OS 執行期間繼續存在。
 
@@ -372,12 +416,17 @@ BDS 找到 OS Loader 後，不會立即失去控制權。OS Loader 仍在 Boot S
 
 Runtime Driver 必須正確處理實體位址轉虛擬位址、記憶體屬性、OS 並行呼叫、SMM／MM Communication Buffer 及安全邊界。許多「OS 開機後才發生」的問題，實際上仍可能源自 Runtime Firmware。
 
-#### 新手最常問：OS 已經啟動，為何還要查 BIOS？
+<details>
+<summary>新手最常問：OS 已經啟動，為何還要查 BIOS？</summary>
 
 - OS 仍可能呼叫 Variable、Time、Reset 與 Capsule Runtime Service。
 - ACPI Table 與 AML 仍持續影響裝置、電源與錯誤回報。
 - Runtime Code／Data 或虛擬位址轉換錯誤，可能只在 OS 階段出現。
 - 問題若集中在 Variable、Sleep／Wake、Reset 或 WHEA，韌體仍在排查範圍內。
+
+</details>
+
+---
 
 ## 5. PEI Foundation、DXE Foundation 與 Core 元件
 
@@ -432,6 +481,8 @@ DXE IPL 位於 PEI 與 DXE 之間，主要工作通常包括：
 - 將控制權移交 DXE Core
 
 若系統已完成 Memory Training，但在 DXE 最早期沒有任何輸出，DXE IPL、DXE Core Image、映像驗證、Stack 或 HOB 完整性是優先觀察範圍。
+
+---
 
 ## 6. PPI、Protocol、HOB、Event 與 Handle Database
 
@@ -529,23 +580,26 @@ UEFI Driver Model 將「驅動程式本身」與「它所管理的 Controller」
 5. 若為 Bus Driver，`Start()` 會探索下游裝置並建立 Child Handle。
 6. `Stop()` 必須釋放 Child、關閉 Protocol 關係並回復資源。
 
-```text
-Driver Binding Handle (Agent)
-            |
-            | Supported() / Start()
-            v
-    Controller Handle
-            |
-            | Bus Driver 枚舉
-            v
-       Child Handle(s)
-            |
-            +--> Device Path
-            +--> I/O Protocol
-            +--> Block I/O / SNP / GOP ...
+```mermaid
+sequenceDiagram
+    participant Core as DXE Core／Boot Manager
+    participant Driver as Driver Binding（Agent）
+    participant Controller as Controller Handle
+    participant Child as Child Handle
+
+    Core->>Driver: ConnectController()
+    Driver->>Controller: Supported()
+    Controller-->>Driver: 回報是否支援
+    Driver->>Controller: Start()
+    Driver->>Child: 建立 Child Handle
+    Child-->>Driver: 安裝 I/O Protocol
+    Driver-->>Core: 綁定完成
 ```
 
+
 這個模型可解釋為何「Driver Entry Point 已執行」仍不代表裝置已可使用。Entry Point 通常只安裝 Driver Binding；真正的硬體初始化與 Child Handle 建立，多半發生在 `ConnectController()` 觸發的 `Start()` 路徑。
+
+---
 
 ## 7. Architectural Protocol 與 Driver Dispatch 相依關係
 
@@ -591,6 +645,8 @@ Driver 已 Dispatch，只表示其程式已進入並安裝必要 Protocol，不�
 | Protocol Notify 永遠未觸發 | 目標 Protocol 未安裝、Notify 註冊時機、GUID 錯誤 |
 | 特定 SKU 才未派送 | PCD、Feature Flag、Board ID、Silicon Policy、FDF 條件 |
 | 更新後派送順序改變 | Depex、Protocol 生產者、FV 配置、Library 副作用、版本差異 |
+
+---
 
 ## 8. `ExitBootServices()` 前後可用服務差異
 
@@ -675,48 +731,24 @@ Runtime Code、Runtime Data 及 MMIO Runtime Region 必須在 Memory Map 中標�
 - SMM Communication Buffer 位址或屬性不一致
 - MMIO Region 未標示 Runtime Attribute
 
+---
+
 ## 9. 從 Reset 到 OS Hand-off 的整體時序
 
-```text
-CPU Reset
-   |
-   v
-Reset Vector / SEC Entry
-   |  建立 Temporary RAM、Stack、早期 Debug
-   v
-PEI Core
-   |  探索 PEIM、建立 PPI Database、判定 Boot Mode
-   |
-   +--> CPU / Silicon / Board PEIM
-   |
-   +--> Memory Initialization / DRAM Training
-   |        |
-   |        +--> Memory Discovered PPI
-   |
-   +--> 建立 Resource / Memory / FV / GUID HOB
-   v
-DXE IPL
-   |  定位、驗證並載入 DXE Core
-   v
-DXE Core
-   |  建立 Memory Service、Handle / Protocol Database、Dispatcher
-   |
-   +--> Architectural Driver
-   +--> PCI / USB / Storage / Network / Console Driver
-   +--> ACPI / SMBIOS / Variable / Security / BMC
-   v
-BDS / UEFI Boot Manager
-   |  Console、BootOrder、BootNext、Boot Option、Recovery
-   v
-OS Loader
-   |  GetMemoryMap、載入 Kernel、準備 OS 開機資料
-   v
-ExitBootServices
-   |  OS 接管一般記憶體、裝置與中斷
-   v
-OS Runtime
-      Runtime Services、ACPI、SMBIOS、SMM/MM 協同
+```mermaid
+flowchart TD
+    A[CPU Reset] --> B[SEC<br/>Temporary RAM、Stack、早期 Debug]
+    B --> C[PEI Core<br/>PEIM、PPI、Boot Mode]
+    C --> D[Memory Initialization<br/>DRAM Training、Memory Migration]
+    D --> E[HOB List<br/>Resource、Memory、FV、CPU]
+    E --> F[DXE IPL<br/>載入 DXE Core]
+    F --> G[DXE Core<br/>Service、Protocol、Dispatcher]
+    G --> H[BDS／Boot Manager<br/>Console、Boot Option、Recovery]
+    H --> I[OS Loader<br/>Memory Map、Kernel、Boot Data]
+    I --> J[ExitBootServices<br/>OS 接管]
+    J --> K[OS Runtime<br/>Runtime Services、ACPI、SMBIOS、SMM／MM]
 ```
+
 
 ### 9.1 關鍵交接點
 
@@ -729,6 +761,8 @@ OS Runtime
 | DXE → BDS | Architectural Protocol、Console、Boot Device 基礎完成 | Handle／Protocol、Boot Variable | Front Page 前後 Hang、無 Boot Option |
 | BDS → OS Loader | Boot Option 與載入媒體可用 | Device Path、Loaded Image、System Table | 找不到媒體、Security Violation |
 | OS Loader → OS | 最新 Memory Map 與 Runtime 資源正確 | Map Key、ACPI、SMBIOS、Runtime Map | `ExitBootServices()` 失敗、OS 早期 Crash |
+
+---
 
 ## 10. EDK II 中的對應位置
 
@@ -748,6 +782,8 @@ OS Runtime
 | DXE Services Library | `MdePkg/Library/DxeServicesTableLib/` |
 
 > 注意：路徑與模組可能隨 edk2 分支、平台整合方式或下游專案調整。文件應記錄實際使用的 Commit、Tag 或供應商版本，避免只寫「最新版」。
+
+---
 
 ## 11. 建議觀測點與 Debug 資料
 
@@ -815,6 +851,8 @@ OS Runtime
 - `GetMemoryMap()` 與 `ExitBootServices()` 是否成功
 - Runtime Memory Attribute 是否正確
 
+---
+
 ## 12. 驗證與測試重點
 
 ### 12.1 基本測試矩陣
@@ -850,6 +888,8 @@ OS Runtime
 - OS Event Log、WHEA／AER／MCE 沒有新增韌體相關錯誤
 - Runtime Variable、Reset 與 Capsule 查詢可正常使用
 - Cold／Warm／Update／Recovery 路徑結果一致
+
+---
 
 ## 13. 常見問題與排查方向
 
@@ -929,6 +969,8 @@ OS Runtime
 - SMM／MM Communication Buffer 的位址與權限
 - Variable Store 空間、FTW 與鎖定狀態
 
+---
+
 ## 14. 安全性與相容性注意事項
 
 ### 14.1 信任邊界隨階段擴張
@@ -970,6 +1012,8 @@ OS Runtime
 
 這項紀律可降低 Temporary RAM 遷移、HOB 消費、Runtime Pointer 及 SMM Communication 所造成的隱性錯誤。
 
+---
+
 ## 15. 本章摘要
 
 UEFI／PI 開機流程可以濃縮成五個連續問題：
@@ -982,9 +1026,11 @@ UEFI／PI 開機流程可以濃縮成五個連續問題：
 
 遇到問題時，先判斷最後成功的階段與交接點，再檢查該處的必要條件、資料結構與服務可用性，通常比直接追查單一 Driver 更有效率。
 
+---
+
 ## 15.1 讀完本章後，你應該能回答的問題
 
-- [ ] 我能用一句話說明 UEFI、PI 與 EDK II 的差異。
+- [ ] 我能用說明 UEFI、PI 與 EDK II 的差異。
 - [ ] 我能說出 SEC、PEI、DXE、BDS、Runtime 各自的主要責任。
 - [ ] 我能指出 Temporary RAM、Permanent Memory 與 Memory Migration 發生在哪裡。
 - [ ] 我能區分 PPI、Protocol、HOB、Event 與 Handle 的用途。
@@ -999,6 +1045,8 @@ UEFI／PI 開機流程可以濃縮成五個連續問題：
 
 如果有三項以上無法回答，建議回到第 0、4、6、8、9 節重新閱讀，並搭配實際平台 Serial Log 標示每個階段的起訖點。
 
+---
+
 ## 15.2 本章重點濃縮
 
 - 先辨識階段，再選擇工具與排查方向。
@@ -1007,6 +1055,8 @@ UEFI／PI 開機流程可以濃縮成五個連續問題：
 - Driver 已 Dispatch 不等於 Controller 已 Connect。
 - `ExitBootServices()` 是韌體與 OS 資源所有權的主要分界。
 - OS 啟動後發生的 Variable、ACPI、Reset 或 Runtime Crash，仍可能屬於韌體問題。
+
+---
 
 ## 16. 參考資料
 
