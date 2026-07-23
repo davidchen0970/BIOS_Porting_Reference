@@ -65,7 +65,6 @@ flowchart TD
 4. 再讀第 6 節，理解 PPI、Protocol、HOB、Event 與 Handle。
 5. 最後閱讀 `ExitBootServices()`、Debug、測試與常見問題。
 
----
 
 ## 1. 文件目的
 
@@ -106,7 +105,6 @@ flowchart TD
 - 開機效能、驗證、安全與現場問題分析人員
 - 需要閱讀 EDK II 原始碼、Serial Log、POST Code 或 Build Report 的開發者
 
----
 
 ## 2. 建議先備知識
 
@@ -122,7 +120,6 @@ flowchart TD
 
 不熟悉上述項目時，仍可先閱讀本章的流程圖，再回到各專題章節補充細節。
 
----
 
 ## 3. UEFI 與 PI 規格的定位及邊界
 
@@ -238,7 +235,6 @@ UefiMain (
 
 閱讀 `gST->ConOut`、`gBS->LocateProtocol()` 或 `gRT->GetVariable()` 時，可先判斷它分別屬於 Console Protocol、Boot Services 或 Runtime Services，再確認該服務在目前階段是否仍有效。
 
----
 
 ## 4. SEC、PEI、DXE、BDS 與 Runtime 的生命週期
 
@@ -426,7 +422,6 @@ Runtime Driver 必須正確處理實體位址轉虛擬位址、記憶體屬性�
 
 </details>
 
----
 
 ## 5. PEI Foundation、DXE Foundation 與 Core 元件
 
@@ -482,7 +477,6 @@ DXE IPL 位於 PEI 與 DXE 之間，主要工作通常包括：
 
 若系統已完成 Memory Training，但在 DXE 最早期沒有任何輸出，DXE IPL、DXE Core Image、映像驗證、Stack 或 HOB 完整性是優先觀察範圍。
 
----
 
 ## 6. PPI、Protocol、HOB、Event 與 Handle Database
 
@@ -599,7 +593,6 @@ sequenceDiagram
 
 這個模型可解釋為何「Driver Entry Point 已執行」仍不代表裝置已可使用。Entry Point 通常只安裝 Driver Binding；真正的硬體初始化與 Child Handle 建立，多半發生在 `ConnectController()` 觸發的 `Start()` 路徑。
 
----
 
 ## 7. Architectural Protocol 與 Driver Dispatch 相依關係
 
@@ -646,7 +639,6 @@ Driver 已 Dispatch，只表示其程式已進入並安裝必要 Protocol，不�
 | 特定 SKU 才未派送 | PCD、Feature Flag、Board ID、Silicon Policy、FDF 條件 |
 | 更新後派送順序改變 | Depex、Protocol 生產者、FV 配置、Library 副作用、版本差異 |
 
----
 
 ## 8. `ExitBootServices()` 前後可用服務差異
 
@@ -731,7 +723,6 @@ Runtime Code、Runtime Data 及 MMIO Runtime Region 必須在 Memory Map 中標�
 - SMM Communication Buffer 位址或屬性不一致
 - MMIO Region 未標示 Runtime Attribute
 
----
 
 ## 9. 從 Reset 到 OS Hand-off 的整體時序
 
@@ -762,7 +753,6 @@ flowchart TD
 | BDS → OS Loader | Boot Option 與載入媒體可用 | Device Path、Loaded Image、System Table | 找不到媒體、Security Violation |
 | OS Loader → OS | 最新 Memory Map 與 Runtime 資源正確 | Map Key、ACPI、SMBIOS、Runtime Map | `ExitBootServices()` 失敗、OS 早期 Crash |
 
----
 
 ## 10. EDK II 中的對應位置
 
@@ -783,7 +773,6 @@ flowchart TD
 
 > 注意：路徑與模組可能隨 edk2 分支、平台整合方式或下游專案調整。文件應記錄實際使用的 Commit、Tag 或供應商版本，避免只寫「最新版」。
 
----
 
 ## 11. 建議觀測點與 Debug 資料
 
@@ -851,7 +840,6 @@ flowchart TD
 - `GetMemoryMap()` 與 `ExitBootServices()` 是否成功
 - Runtime Memory Attribute 是否正確
 
----
 
 ## 12. 驗證與測試重點
 
@@ -889,7 +877,6 @@ flowchart TD
 - Runtime Variable、Reset 與 Capsule 查詢可正常使用
 - Cold／Warm／Update／Recovery 路徑結果一致
 
----
 
 ## 13. 常見問題與排查方向
 
@@ -969,7 +956,6 @@ flowchart TD
 - SMM／MM Communication Buffer 的位址與權限
 - Variable Store 空間、FTW 與鎖定狀態
 
----
 
 ## 14. 安全性與相容性注意事項
 
@@ -1012,7 +998,6 @@ flowchart TD
 
 這項紀律可降低 Temporary RAM 遷移、HOB 消費、Runtime Pointer 及 SMM Communication 所造成的隱性錯誤。
 
----
 
 ## 15. 本章摘要
 
@@ -1026,7 +1011,6 @@ UEFI／PI 開機流程可以濃縮成五個連續問題：
 
 遇到問題時，先判斷最後成功的階段與交接點，再檢查該處的必要條件、資料結構與服務可用性，通常比直接追查單一 Driver 更有效率。
 
----
 
 ## 15.1 讀完本章後，你應該能回答的問題
 
@@ -1045,7 +1029,6 @@ UEFI／PI 開機流程可以濃縮成五個連續問題：
 
 如果有三項以上無法回答，建議回到第 0、4、6、8、9 節重新閱讀，並搭配實際平台 Serial Log 標示每個階段的起訖點。
 
----
 
 ## 15.2 本章重點濃縮
 
@@ -1056,7 +1039,6 @@ UEFI／PI 開機流程可以濃縮成五個連續問題：
 - `ExitBootServices()` 是韌體與 OS 資源所有權的主要分界。
 - OS 啟動後發生的 Variable、ACPI、Reset 或 Runtime Crash，仍可能屬於韌體問題。
 
----
 
 ## 16. 參考資料
 
