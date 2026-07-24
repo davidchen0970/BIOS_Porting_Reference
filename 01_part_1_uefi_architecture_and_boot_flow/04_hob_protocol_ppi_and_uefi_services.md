@@ -48,7 +48,6 @@
 - **設計審查與程式審查**：使用 4.11 檢查清單，逐項確認 Producer／Consumer、記憶體類型、錯誤回收、Open／Close 關係與 Runtime 邊界。
 - **測試與回歸規劃**：使用附錄 A 建立測試矩陣、Pass／Fail 條件與測試紀錄。
 
----
 
 ### 4.1 整體架構與資料流
 
@@ -560,7 +559,6 @@ grep -R "gEfiDriverBindingProtocolGuid" -n --include='*.inf' --include='*.c' .
 
 > 規格名稱、函式名稱與欄位定義應以專案採用的 UEFI／PI Specification 及 EDK II branch 為準。本章提供可重複使用的 BIOS 移植與排查架構，不取代平台供應商文件。
 
----
 
 ## 附錄 A：驗證與測試檢查表
 
@@ -593,7 +591,6 @@ grep -R "gEfiDriverBindingProtocolGuid" -n --include='*.inf' --include='*.c' .
 - HOB／PPI／Protocol／Handle 差異，以及 Memory Map 與 Open 關係。
 - Pass／Fail 判定、已知限制、回歸範圍與附件位置。
 
----
 
 ## 附錄 B：極簡除錯決策樹
 
