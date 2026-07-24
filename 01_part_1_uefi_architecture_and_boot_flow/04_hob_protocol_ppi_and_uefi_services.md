@@ -67,7 +67,7 @@ HOB、PPI 與 Protocol 都可傳遞資訊，但服務的階段與使用模型不
 簡化資料流如下：
 
 ```mermaid
-flowchart LR
+flowchart TD
     SEC[SEC] --> PEI[PEI Foundation / PEIM]
     PEI -->|Install / Locate / Notify| PPI[PPI Database]
     PEI -->|Build HOB| HOB[HOB List]
