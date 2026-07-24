@@ -1,6 +1,6 @@
 # 3. Firmware Volume、FFS 與映像檔配置
 
-狀態：Draft  
+狀態：Draft，寫作精煉版 v2  
 適用範圍：UEFI PI 架構、EDK II 平台韌體、BIOS Flash 映像檔分析與移植  
 
 > 本章以通用 UEFI PI 與 EDK II 架構說明 Firmware Device、Firmware Volume、FFS 與映像檔配置。實際 Flash Region、FV 名稱、容量、Base Address、Erase Block、簽章與更新策略，仍應以目標平台的 FDF、DSC、DEC、Flash Descriptor、Silicon 文件及量產更新規格為準。
@@ -13,19 +13,29 @@
 
 ## 快速導覽
 
-- [3.1 Flash Region 與 Firmware Device 拓樸](#31-flash-region-與-firmware-device-拓樸)：先建立實體 Flash、邏輯 Region、Firmware Device 與 FV 的整體關係。
-- [3.2 FV Header、Block Map 與 Alignment](#32-fv-headerblock-map-與-alignment)：說明 FV 如何描述容量、Erase Block、屬性及對齊需求。
-- [3.3 FFS File Type、Section Type 與 GUID](#33-ffs-file-typesection-type-與-guid)：說明 FV 內的檔案與 Section 階層。
-- [3.4 Compression、GUID-defined Section、PE/COFF 與 TE Image](#34-compressionguid-defined-sectionpecoff-與-te-image)：說明模組內容如何封裝、壓縮及載入。
-- [3.5 Apriori、Depex 與模組載入順序](#35-aprioridepex-與模組載入順序)：說明 PEI／DXE Dispatcher 如何決定模組可否執行及執行順序。
-- [3.6 FDF 佈局、空間預算與 Free Space](#36-fdf-佈局空間預算與-free-space)：從平台建構設定追到最終 BIOS image。
+- [3.1 Flash Region 與 Firmware Device 拓樸](#31-flash-region-與-firmware-device-拓樸)：建立實體 Flash、邏輯 Region、Firmware Device 與 FV 的整體關係。
+- [3.2 FDF 佈局、空間預算與 Free Space](#32-fdf-佈局空間預算與-free-space)：由設計配置追到最終 BIOS image，並管理容量。
+- [3.3 FV Header、Block Map 與 Alignment](#33-fv-headerblock-map-與-alignment)：說明 FV 的容量、Erase Block、屬性與對齊規則。
+- [3.4 FFS File Type、Section Type 與 GUID](#34-ffs-file-typesection-type-與-guid)：說明 FV 內的檔案及 Section 階層。
+- [3.5 Compression、GUID-defined Section、PE/COFF 與 TE Image](#35-compressionguid-defined-sectionpecoff-與-te-image)：說明內容如何封裝、壓縮及載入。
+- [3.6 Apriori、Depex 與元件載入順序](#36-aprioridepex-與元件載入順序)：說明 PEI／DXE Dispatcher 如何判定執行條件與順序。
 - [3.7 映像檔解析、版控與差異比對方式](#37-映像檔解析版控與差異比對方式)：提供可重複使用的解析、比對與排查流程。
+
+### 建議閱讀路徑
+
+| 讀者角色 | 建議章節 | 閱讀目的 |
+|---|---|---|
+| 初次接觸 BIOS image 的工程師 | 3.1、3.3、3.4 | 建立 Flash、FV、FFS 與 Section 的層級認知 |
+| 平台架構與建構整合人員 | 3.1～3.4 | 規劃 FDF、Flash Map、FV 容量與檔案配置 |
+| 映像檔分析人員 | 3.4、3.5、3.7 | 理解遞迴封裝、可執行映像與結構化比對 |
+| 開機流程除錯人員 | 3.3～3.7 | 排查 FV 發現、Depex、載入與安全驗證問題 |
+| QA、驗證與 Release 人員 | 3.7～3.9 | 建立比對基準、測試矩陣與相容性檢查 |
 
 ## 3.1 Flash Region 與 Firmware Device 拓樸
 
 ### 3.1.1 為什麼要先理解 Flash 拓樸
 
-BIOS image 並不等同於單一、連續且可任意配置的 FV。平台可能先由 Flash Descriptor、SoC ROM 或平台規格切分數個 Region，再由 BIOS Region 內的 Firmware Device 配置一個或多個 FV。部分平台另有 EC、GbE、Management Engine、安全處理器、NVRAM、Recovery 或 OEM 資料區域。
+BIOS image 並非單一且可任意配置的 FV。平台可能先由 Flash Descriptor、SoC ROM 或平台規格切分數個 Region，再由 BIOS Region 內的 Firmware Device 配置一個或多個 FV。部分平台另有 EC、GbE、Management Engine、安全處理器、NVRAM、Recovery 或 OEM 資料區域。
 
 分析映像檔時，建議由外而內建立下列層級：
 
@@ -87,13 +97,83 @@ flowchart LR
 |---:|---:|---:|---|---|---|---|
 | `<待填>` | `<待填>` | `<待填>` | `<待填>` | `<待填>` | Full／Capsule／不更新 | `<待填>` |
 
-## 3.2 FV Header、Block Map 與 Alignment
+## 3.2 FDF 佈局、空間預算與 Free Space
 
-### 3.2.1 FV 的角色
+### 3.2.1 FDF 在映像產生流程中的位置
 
-Firmware Volume 是 Firmware Device 內可由 PI Firmware Volume Block／Firmware Volume Protocol 辨識的邏輯容器。FV Header 說明此 Volume 的長度、屬性、檔案系統 GUID、Header 長度、Checksum 及 Block Map。Dispatcher 或 FV Driver 依此建立可搜尋的 FFS 檔案集合。
+EDK II 專案通常由 DSC 決定平台模組與 PCD 組合，由 INF 描述單一模組，再由 FDF 決定 FD、FV、FILE、Section 及 Capsule 等映像配置。不同專案可能再由 DSC include、FDF include、build script 或供應商工具包裝最終映像。
 
-### 3.2.2 FV Header 重要欄位
+```mermaid
+flowchart LR
+    A[DEC／INF] --> D[EDK II Build]
+    B[DSC] --> D
+    C[FDF] --> D
+    D --> E[Module EFI／Library]
+    D --> F[FV Files]
+    F --> G[FD／BIOS Region]
+    G --> H[Signing／Capsule／Vendor Packaging]
+    H --> I[Final Flash Image]
+```
+
+### 3.2.2 FDF 常見配置單位
+
+| 配置單位 | 用途 | 回查方式 |
+|---|---|---|
+| `[FD]` | 定義 Base、Size、Erase Polarity、Block Size 與 Region | 對照 Flash Map 與最終 image offset |
+| `[FV]` | 定義 FV 屬性及包含的 FFS／INF | 解析 FV Header、檢查模組清單 |
+| `INF` | 將指定模組放入 FV | 對照 INF FILE_GUID 與 Build Report |
+| `FILE` | 明確建立特定 File Type 與 Section | 解析 FFS Type、GUID 與 Section tree |
+| `APRIORI` | 指定 PEI／DXE 優先模組清單 | 解析 Apriori FFS 內容 |
+| `[Capsule]` | 定義更新封裝 | 對照更新工具、簽章與版本政策 |
+| `!include`／巨集 | 重用平台配置與 SKU 差異 | 展開後確認實際生效內容 |
+
+### 3.2.3 空間預算
+
+FV 空間規劃不應只以「目前還放得下」判定。建議至少分成：固定內容、可成長模組、壓縮波動、簽章／對齊額外成本、更新需求及保留空間。
+
+```text
+FV Budget = Fixed Content
+          + Growth Reserve
+          + Alignment/Padding
+          + Compression Variance
+          + Authentication Metadata
+          + Recovery/Update Reserve
+```
+
+建議維護下列表格：
+
+| FV | 配置容量 | 已使用 | Free Space | 使用率 | 主要成長來源 | 最低保留門檻 |
+|---|---:|---:|---:|---:|---|---:|
+| `<待填>` | `<待填>` | `<待填>` | `<待填>` | `<待填>` | Setup／Microcode／Driver／Logo | `<待填>` |
+
+### 3.2.4 Free Space 與 Pad File
+
+Free Space 是 FV 尚未配置為有效 FFS 的區域；Pad File 則可能是檔案系統為了對齊或填充而建立的有效 FFS 類型。兩者在工具畫面中可能都顯示為空白或 Padding，但維護意義不同。
+
+需要確認：
+
+- Free Space 是否連續，能否容納預期新增檔案。
+- 新增模組後是否因對齊產生超出預期的 Padding。
+- 大型 FFS 是否跨越平台更新或驗證工具的限制。
+- 若需擴張 FV，依 3.7.5 的 Region 邊界與更新項目集中檢查。
+- 壓縮率變化是否造成不同 Build 結果偶發超過容量。
+
+### 3.2.5 容量不足的處理順序
+
+1. 先確認模組是否重複放入多個 FV。
+2. 查找 Debug 資訊、未使用字串、Logo、Setup 資源及可移除功能。
+3. 檢查 PE32／TE 與壓縮策略是否符合平台政策。
+4. 檢查 Library／Feature PCD 是否可縮減內容。
+5. 評估跨 FV 移動模組時，早期可見性、Depex、Recovery 與安全驗證影響。
+6. 最後才調整 FV／Region 容量，並完整檢查 Flash Map 與更新相容性。
+
+## 3.3 FV Header、Block Map 與 Alignment
+
+### 3.3.1 FV 的角色
+
+Firmware Volume 是 Firmware Device 內可由 PI Firmware Volume Block／Firmware Volume Protocol 辨識的邏輯容器。FV Header 說明此 Volume 的長度、屬性、檔案系統 GUID、Header 長度、Checksum 及 Block Map。Firmware Volume Driver 藉此列舉 FV 內的 FFS 檔案，Dispatcher 再從中尋找可執行元件。
+
+### 3.3.2 FV Header 重要欄位
 
 | 欄位 | 用途 | 排查重點 |
 |---|---|---|
@@ -106,7 +186,7 @@ Firmware Volume 是 Firmware Device 內可由 PI Firmware Volume Block／Firmwar
 | ExtHeaderOffset | 延伸 Header 位置 | 若存在，Offset 是否在 FV 範圍內 |
 | Revision | FV Header Revision | 工具鏈與解析器是否支援 |
 
-### 3.2.3 Block Map 與 Erase Block
+### 3.3.3 Block Map 與 Erase Block
 
 Block Map 以「區塊數量 × 每區塊長度」描述 FV 所涵蓋的儲存範圍。所有 Block Map 項目的容量總和應與 `FvLength` 一致。
 
@@ -121,7 +201,7 @@ FV Size = Σ (NumBlocks[i] × BlockLength[i])
 - 映像檔可建出，但實機更新或首次開機失敗。
 - 工具解析正常，但平台 Firmware Volume Block Driver 無法正確提供 Block I/O。
 
-### 3.2.4 Alignment
+### 3.3.4 Alignment
 
 Alignment 可能同時存在於 FD、FV、FFS、Section 及可執行映像。文件應避免只記錄單一「對齊值」，而應指出是哪一層的要求。
 
@@ -133,7 +213,7 @@ Alignment 可能同時存在於 FD、FV、FFS、Section 及可執行映像。文
 | Section | 讓 Section Header 與 payload 可正確解析 | Section chain 中斷 |
 | PE/COFF | SectionAlignment、FileAlignment、Image Base | Relocation 或載入失敗 |
 
-### 3.2.5 FV Header 檢查流程
+### 3.3.5 FV Header 檢查流程
 
 1. 由 Flash Map 找到預期 FV Base。
 2. 確認 Signature、FvLength、HeaderLength 與 Checksum。
@@ -142,11 +222,18 @@ Alignment 可能同時存在於 FD、FV、FFS、Section 及可執行映像。文
 5. 檢查第一個 FFS Header 的位置與對齊。
 6. 對照 FDF、Build Report 與實際 image，確認三者一致。
 
-## 3.3 FFS File Type、Section Type 與 GUID
+## 3.4 FFS File Type、Section Type 與 GUID
 
-### 3.3.1 FFS 檔案結構
+### 3.4.1 FFS 檔案結構
 
 FV 內以 FFS File 為主要管理單位。每個檔案通常由 Name GUID 識別，並具有 File Type、Attributes、State、Size 及完整性檢查資訊。File 內容再由一個或多個 Section 組成。
+
+本章採用下列用詞，避免「模組」同時指涉建構單位與映像內容：
+
+- **FFS 檔案**：FV 內的 binary 管理單位。
+- **INF 模組**：由 INF 描述的 EDK II 建構單位。
+- **PEIM／DXE Driver／Application**：依執行階段與 File Type 指稱可執行元件。
+- **元件**：不限定建構或執行層級時的泛稱。
 
 ```text
 FFS File
@@ -158,7 +245,7 @@ FFS File
 └── Raw／Freeform／GUID-defined／Compression Section
 ```
 
-### 3.3.2 常見 FFS File Type
+### 3.4.2 常見 FFS File Type
 
 | 類型 | 常見用途 | 關注重點 |
 |---|---|---|
@@ -172,7 +259,7 @@ FFS File
 | Freeform／Raw | Microcode、設定、OEM binary 等 | 解析責任在何模組、格式版本 |
 | Pad | 填補對齊或空間 | 不應誤判為有效模組 |
 
-### 3.3.3 常見 Section Type
+### 3.4.3 常見 Section Type
 
 | Section | 用途 | 解析／載入時機 |
 |---|---|---|
@@ -187,7 +274,7 @@ FFS File
 | FV Image | 內嵌 Firmware Volume | 產生或安裝新的 FV |
 | Raw | 不由 PI 定義內容格式 | 由消費該資料的模組解讀 |
 
-### 3.3.4 GUID 管理
+### 3.4.4 GUID 管理
 
 GUID 不只是名稱。它可能代表 FFS File、Firmware Volume File System、Protocol、PPI、HOB、Variable Namespace 或 GUID-defined Section 的處理格式。建議建立專案 GUID 對照表：
 
@@ -197,14 +284,14 @@ GUID 不只是名稱。它可能代表 FFS File、Firmware Volume File System、
 
 排查「同名模組不存在」時，不應只查 UI Name。應同時查：
 
-- INF 的 `FILE_GUID`。
-- FDF 的 `FILE`／`INF` 配置。
+- INF 模組的 `FILE_GUID`。
+- FDF 的 `FILE`／`INF` 配置，以及 INF 模組被放入哪個 FV。
 - 解析後映像中的 FFS Name GUID。
 - Build Report 中模組與 FV 的對應。
 
-## 3.4 Compression、GUID-defined Section、PE/COFF 與 TE Image
+## 3.5 Compression、GUID-defined Section、PE/COFF 與 TE Image
 
-### 3.4.1 為什麼映像檔需要分層解析
+### 3.5.1 為什麼映像檔需要分層解析
 
 一個 FFS File 的可執行 Section 不一定直接位於檔案第一層。它可能先包在 Compression Section，再包在 GUID-defined Section，或置於巢狀 FV 中。因此分析工具必須遞迴解析，不能只搜尋 PE Header 字串。
 
@@ -216,17 +303,17 @@ FFS
         └── PE32／TE Section
 ```
 
-### 3.4.2 Compression Section
+### 3.5.2 Compression Section
 
-Compression 可降低 Flash 使用量，但會增加解壓需求、暫存記憶體與早期開機時間。採用前應評估：
+Compression 可降低 Flash 使用量，但代價是增加解壓時間、暫存記憶體需求與早期開機延遲。採用前應逐項評估：
 
-- 解壓模組是否在需要解壓的 FV 之外，並能更早執行。
-- SEC／PEI 階段可用記憶體是否足夠。
-- 壓縮後節省的容量與解壓成本是否符合平台需求。
-- Recovery path 是否具備相同解壓能力。
-- 更新工具、簽章工具與離線解析工具是否支援該格式。
+- **解壓時機**：解壓元件是否位於待解壓 FV 之外，且能更早執行？
+- **記憶體約束**：SEC／PEI 階段是否提供足夠的暫存空間？
+- **成本效益**：節省的 Flash 容量是否值得付出解壓與開機時間成本？
+- **復原路徑**：Recovery path 是否具備相同的解壓能力？
+- **工具鏈支援**：更新工具、簽章工具與離線解析器是否相容？
 
-### 3.4.3 GUID-defined Section
+### 3.5.3 GUID-defined Section
 
 GUID-defined Section 由 GUID 指定其處理方式。若 Section Attributes 表示必須經處理後才能存取內容，平台需先取得對應的處理服務。常見用途包含自訂壓縮、驗證、簽章封裝或供應商格式。
 
@@ -238,7 +325,7 @@ GUID-defined Section 由 GUID 指定其處理方式。若 Section Attributes 表
 4. 處理服務何時可用。
 5. 處理失敗時的 Status、POST code 或 debug log。
 
-### 3.4.4 PE/COFF 與 TE Image
+### 3.5.4 PE/COFF 與 TE Image
 
 PE/COFF Section 保留較完整的映像 Header；TE Image 透過裁減部分 Header 降低體積。兩者都可能需要 Image Loader 解析、分配記憶體、複製 Section、套用 Relocation、處理記憶體屬性後再轉移控制權。
 
@@ -258,9 +345,9 @@ PE/COFF Section 保留較完整的映像 Header；TE Image 透過裁減部分 He
 - 安全驗證拒絕該映像。
 - 所需 Depex 尚未滿足，實際上尚未進入 Image Loader。
 
-## 3.5 Apriori、Depex 與模組載入順序
+## 3.6 Apriori、Depex 與元件載入順序
 
-### 3.5.1 Dispatcher 的基本判斷
+### 3.6.1 Dispatcher 的基本判斷
 
 PEI 與 DXE Dispatcher 不單純依 FV 內的物理排列順序啟動模組。一般流程是先列舉可用 FFS，解析 Depex，檢查所需 PPI／Protocol 或條件，再將可執行模組放入排程。
 
@@ -276,109 +363,44 @@ flowchart TD
     H --> C
 ```
 
-### 3.5.2 Apriori
+### 3.6.2 Apriori
 
-Apriori File 可指定一組優先考慮的模組 GUID。它可用於早期建立關鍵服務，但不應被當成取代 Depex 的一般排序工具。
+Apriori 檔案提供一組優先調度的 FFS GUID 清單。它可用於早期建立關鍵服務，但不應被當成取代 Depex 的一般排序工具。
 
 使用 Apriori 前應確認：
 
-- 模組即使被優先考慮，必要的 PPI／Protocol 是否仍已存在。
+- FFS 即使列於 Apriori，必要的 PPI／Protocol 是否仍已存在。
 - GUID 是否與實際 FFS Name GUID 一致。
 - PEI Apriori 與 DXE Apriori 是否放在正確 FV。
 - 新增順序依賴是否掩蓋模組介面設計問題。
 
-### 3.5.3 Depex
+### 3.6.3 Depex
 
 Depex 描述模組可被 Dispatcher 啟動的條件。常見邏輯包含 `AND`、`OR`、`NOT`、`TRUE`、`FALSE`，及依階段定義的特殊表示方式。
 
-排查模組未啟動時，建議依序確認：
+排查 PEIM 或 DXE Driver 未啟動時，建議依序確認：
 
-1. 模組是否真的存在於已被列舉的 FV。
+1. 對應 FFS 檔案是否存在於已列舉的 FV。
 2. FFS File Type 是否符合目前 Dispatcher。
 3. Depex Section 是否存在且可正確解析。
 4. 每一個相依 GUID 是否已由其他模組安裝。
 5. 提供者是否因自身 Depex、載入錯誤或安全檢查而未執行。
 6. 是否有循環相依或 Dispatch 多輪後仍無法滿足的條件。
 
-### 3.5.4 載入順序問題的觀測點
+### 3.6.4 載入順序問題的觀測點
 
-| 現象 | 優先觀測 | 可能方向 |
+Debug 字串與工具命令會隨 EDK II 分支、平台 DebugLib、Shell 版本及安全架構而異。下表列出常見入口，實際判讀仍應回查目標專案的 log 格式。
+
+| 現象 | 優先觀測（指令／Log） | 可能方向 |
 |---|---|---|
-| 模組完全沒有 log | FV／FFS 列舉紀錄、Depex dump | 模組未進 FV、FV 未發現、Depex 未滿足 |
-| Entry Point 未到達 | Image Loader Status、安全驗證 log | PE/COFF 錯誤、Relocation、簽章拒絕 |
-| Protocol 一直不存在 | 提供者狀態、Handle Database | 提供者未執行或安裝失敗 |
-| 改 FDF 排列後偶爾正常 | Apriori、Depex、未宣告的順序假設 | 模組間存在隱性先後關係 |
-| Recovery path 才失敗 | Recovery FV 內容與 Depex | 缺模組、缺解壓服務、不同 Apriori |
+| PEIM 或 Driver 完全沒有 log | 搜尋 `Loading PEIM`、`Loading driver`、`Dispatch` 等平台載入訊息；檢查 Build Report 是否列於預期 FV | FFS 未進 FV、FV 未列舉、File Type 不符、Depex 未滿足 |
+| Entry Point 未到達 | 搜尋 `LoadImage`、`StartImage`、`ImageAddress`、`EntryPoint` 及回傳的 `EFI_STATUS` | PE/COFF 損壞、Relocation 失敗、記憶體配置失敗 |
+| 出現安全拒絕 | 搜尋 `EFI_SECURITY_VIOLATION`、`Security2`、`Image Authentication` 或平台驗證訊息 | 映像簽章、憑證鏈、雜湊或執行政策不符 |
+| Protocol 一直不存在 | 在支援的 UEFI Shell 使用 `dh -d` 或專案內 Handle／Protocol dump 工具，查詢目標 Protocol GUID | 提供該 Protocol 的 Driver 未執行、安裝失敗或 Handle 不符預期 |
+| 改 FDF 排列後才正常 | 比較 Apriori、Depex、PPI／Protocol 安裝順序及 Dispatch log | 元件間存在未宣告的先後假設 |
+| Recovery path 才失敗 | 比較正常 FV 與 Recovery FV 的 FFS manifest、Apriori、Depex 及解壓處理元件 | Recovery FV 缺少必要 FFS、解壓服務或驗證元件 |
 
-## 3.6 FDF 佈局、空間預算與 Free Space
-
-### 3.6.1 FDF 在映像產生流程中的位置
-
-EDK II 專案通常由 DSC 決定平台模組與 PCD 組合，由 INF 描述單一模組，再由 FDF 決定 FD、FV、FILE、Section 及 Capsule 等映像配置。不同專案可能再由 DSC include、FDF include、build script 或供應商工具包裝最終映像。
-
-```mermaid
-flowchart LR
-    A[DEC／INF] --> D[EDK II Build]
-    B[DSC] --> D
-    C[FDF] --> D
-    D --> E[Module EFI／Library]
-    D --> F[FV Files]
-    F --> G[FD／BIOS Region]
-    G --> H[Signing／Capsule／Vendor Packaging]
-    H --> I[Final Flash Image]
-```
-
-### 3.6.2 FDF 常見配置單位
-
-| 配置單位 | 用途 | 回查方式 |
-|---|---|---|
-| `[FD]` | 定義 Base、Size、Erase Polarity、Block Size 與 Region | 對照 Flash Map 與最終 image offset |
-| `[FV]` | 定義 FV 屬性及包含的 FFS／INF | 解析 FV Header、檢查模組清單 |
-| `INF` | 將指定模組放入 FV | 對照 INF FILE_GUID 與 Build Report |
-| `FILE` | 明確建立特定 File Type 與 Section | 解析 FFS Type、GUID 與 Section tree |
-| `APRIORI` | 指定 PEI／DXE 優先模組清單 | 解析 Apriori FFS 內容 |
-| `[Capsule]` | 定義更新封裝 | 對照更新工具、簽章與版本政策 |
-| `!include`／巨集 | 重用平台配置與 SKU 差異 | 展開後確認實際生效內容 |
-
-### 3.6.3 空間預算
-
-FV 空間規劃不應只以「目前還放得下」判定。建議至少分成：固定內容、可成長模組、壓縮波動、簽章／對齊額外成本、更新需求及保留空間。
-
-```text
-FV Budget = Fixed Content
-          + Growth Reserve
-          + Alignment/Padding
-          + Compression Variance
-          + Authentication Metadata
-          + Recovery/Update Reserve
-```
-
-建議維護下列表格：
-
-| FV | 配置容量 | 已使用 | Free Space | 使用率 | 主要成長來源 | 最低保留門檻 |
-|---|---:|---:|---:|---:|---|---:|
-| `<待填>` | `<待填>` | `<待填>` | `<待填>` | `<待填>` | Setup／Microcode／Driver／Logo | `<待填>` |
-
-### 3.6.4 Free Space 與 Pad File
-
-Free Space 是 FV 尚未配置為有效 FFS 的區域；Pad File 則可能是檔案系統為了對齊或填充而建立的有效 FFS 類型。兩者在工具畫面中可能都顯示為空白或 Padding，但維護意義不同。
-
-需要確認：
-
-- Free Space 是否連續，能否容納預期新增檔案。
-- 新增模組後是否因對齊產生超出預期的 Padding。
-- 大型 FFS 是否跨越平台更新或驗證工具的限制。
-- FV 擴大後是否侵入 Variable、Recovery 或其他 Region。
-- 壓縮率變化是否造成不同 Build 結果偶發超過容量。
-
-### 3.6.5 容量不足的處理順序
-
-1. 先確認模組是否重複放入多個 FV。
-2. 查找 Debug 資訊、未使用字串、Logo、Setup 資源及可移除功能。
-3. 檢查 PE32／TE 與壓縮策略是否符合平台政策。
-4. 檢查 Library／Feature PCD 是否可縮減內容。
-5. 評估跨 FV 移動模組時，早期可見性、Depex、Recovery 與安全驗證影響。
-6. 最後才調整 FV／Region 容量，並完整檢查 Flash Map 與更新相容性。
+若平台沒有上述字串，建議在 Dispatcher、Image Loader、Security Handler 與 Protocol 安裝路徑增加可識別 GUID、Image Base、Entry Point 及 `EFI_STATUS` 的 Debug 訊息。
 
 ## 3.7 映像檔解析、版控與差異比對方式
 
@@ -402,7 +424,7 @@ Step 3  掃描並驗證 FV Header
 Step 4  列出每個 FV 的 FFS GUID、Type、Size、State
 Step 5  遞迴列出 Section tree
 Step 6  對 PE32／TE 擷取 Machine、Entry Point、Subsystem、Size
-Step 7  對照 Build Report、INF、FDF 與符號檔
+Step 7  將 GUID 對回 INF、FDF、符號檔與來源版本
 Step 8  產出可版控的文字／JSON／CSV 清單
 ```
 
@@ -420,7 +442,7 @@ Step 8  產出可版控的文字／JSON／CSV 清單
 
 ### 3.7.4 版控與差異比對策略
 
-單純對兩個 BIOS image 執行 binary diff，容易被重建時間、簽章、壓縮排列或 Pad 變化干擾。建議建立三層差異報告：
+Binary diff 易受時間戳、簽章、壓縮排列與 Pad 變動干擾，不宜作為唯一比對依據。建議建立三層差異報告：
 
 1. 封裝層：總容量、Region Offset／Size、簽章與 Capsule Header。
 2. 結構層：FV 清單、FFS GUID／Type／Size、Section tree、Free Space。
@@ -527,7 +549,7 @@ FV、FFS 與 Section 是內容封裝格式，本身不等同於信任判定。�
 - FV Header、Block Map、Alignment 與實體 Flash 擦除粒度需一致回查。
 - FFS File Type 決定檔案角色，Section Type 決定內容如何被解析或載入，GUID 則用來識別檔案、介面與特殊處理格式。
 - 壓縮與 GUID-defined Section 需要對應的解壓、驗證或處理服務，並應確認其在開機階段的可用時機。
-- Apriori 只提供優先考慮清單，模組是否能執行仍需配合 Depex、映像載入與安全驗證結果判讀。
+- Apriori 只提供優先調度清單；PEIM 或 Driver 能否執行，仍取決於 Depex、映像載入與安全驗證結果。
 - FDF 決定 FD／FV／FFS 的映像配置；DSC、INF、FDF、Build Report 與最終 binary 應能互相對應。
 - 容量規劃需保留成長、對齊、壓縮波動、簽章及更新需求，不能只以單次 Build 未 overflow 判定。
 - 版本差異應同時進行封裝層、結構層與模組層比對，降低 binary diff 的雜訊。

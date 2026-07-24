@@ -1,5 +1,7 @@
 ## 4. HOB、Protocol、PPI 與 UEFI Service
 
+版本：Revision 2（依技術審閱意見補強）
+
 ### 適用範圍
 
 本章說明 UEFI Platform Initialization 架構中，HOB、PPI、Protocol 與各類 Service 的角色及彼此關係，涵蓋 PEI 到 DXE 的資料交接、模組間介面發布與查找、Handle Database、Driver Binding，以及常見生命週期與記憶體所有權問題。
@@ -22,6 +24,7 @@
 - [區分 UEFI 各類 Service](#46-boot-serviceruntime-service-與-dxe-service)：可使用階段、記憶體限制與 ExitBootServices 邊界。
 - [理解 Driver Binding](#47-handleagentcontroller-與-driver-binding)：Supported、Start、Stop 與控制器拓樸。
 - [排查生命週期與所有權問題](#48-生命週期記憶體所有權與除錯)：常見錯誤、觀測點與驗證順序。
+- [執行驗證與回歸](#附錄-a驗證與測試檢查表)：測試矩陣、Pass／Fail 判定與紀錄欄位。
 
 ---
 
@@ -121,6 +124,19 @@ Info = GET_GUID_HOB_DATA (GuidHob);
 
 對自訂 HOB，建議資料結構包含 `Revision`、`Length` 與保留欄位，使不同 BIOS 版本或 SKU 能判斷相容性。
 
+#### 4.2.4 重要警示：HOB 內嵌指標
+
+> **不得在 HOB 中保存虛擬位址，亦不得保存指向 Temporary RAM、PEI Stack 或其他僅於 PEI 有效區域的指標。** PEI 遷移至永久記憶體後，原始位址可能已失效；DXE 的位址配置與生命週期也不同。消費端若直接解引用這類欄位，可能讀取錯誤資料、觸發 Page Fault，或在部分 Boot Mode 下形成難以重現的損毀。
+
+跨階段資料建議使用以下表達方式：
+
+- **Offset**：相對於 HOB 資料起點或已定義 Buffer 起點的位移，並同時保存總長度。
+- **Physical Address**：只有在該實體區域已由 Resource Descriptor／Memory Allocation HOB 保留，且 DXE 明確理解其屬性與有效期限時使用。
+- **Length／Count**：任何可變長度內容都需提供邊界資訊，消費端在加法與乘法前應檢查溢位。
+- **Inline Data**：資料量合理時，優先把內容直接接在 GUID HOB 後方，避免額外位址相依。
+
+若資料結構無法避免位址欄位，欄位名稱應帶出語意，例如 `PhysicalAddress` 或 `DataOffset`，不要使用含糊的 `Buffer`／`Pointer`。
+
 ### 4.3 常用 HOB 類型與自訂 GUID HOB
 
 | HOB 類型 | 主要內容 | BIOS 移植時的檢查重點 |
@@ -174,6 +190,10 @@ PPI（PEIM-to-PEIM Interface）是 PEI 階段的模組介面。PEIM 透過 GUID 
 
 若模組的主功能完全依賴某個 PPI，通常優先以 Depex 表達。若模組可先初始化，再於某 PPI 出現時補做動作，Notify 較合適。過度依賴 Notify 可能使執行順序難以追蹤，也容易形成重入或隱性相依。
 
+> **PEI 與 DXE 的通知模型需分開理解。** PPI Notify 執行於 PEI Foundation 環境，PEI 規格並未把 UEFI Boot Services 的 TPL 模型套用到 PPI Notify，因此不應將 `TPL_CALLBACK`、`WaitForEvent()` 或 Boot Services `Stall()` 直接寫成 PPI Notify 的限制。PPI Notify 仍應保持短小、避免重入，並避免在回呼中安裝會反覆觸發同一通知的 PPI。若工作量較大，可拆成狀態 PPI、後續 PEIM 或其他明確的 PEI 排程點。
+
+DXE 的 Protocol Notification Event 才需要遵守 UEFI TPL 規則。事件在 `TPL_NOTIFY` 執行時不得阻塞；需要較長處理時，應只記錄必要狀態並 Signal 另一個較低 TPL 的 Event。`WaitForEvent()` 只能在 `TPL_APPLICATION` 呼叫，其他 Service／Protocol 也需依規格所列 TPL 限制使用。
+
 #### 4.4.3 常見時序
 
 ```mermaid
@@ -196,6 +216,8 @@ sequenceDiagram
 #### 4.5.1 Protocol 與 Handle Database
 
 DXE 中的 Protocol 是由 GUID 識別的介面，安裝在 EFI Handle 上。一個 Handle 可安裝多個 Protocol，用來表示同一個 Controller、Image 或邏輯物件的能力集合。
+
+可把 Handle 理解成一個可擴充的「物件標籤」或能力集合索引，而不是硬體位址。Protocol 則是貼在這個標籤上的能力描述。例如，一個複合式控制器若同時提供儲存與網路功能，韌體可能在相關 Handle 上發布 `EFI_BLOCK_IO_PROTOCOL` 與 `EFI_SIMPLE_NETWORK_PROTOCOL`，讓消費端依 GUID 尋找所需能力。實際的 PCI Device／Function 通常由 Device Path、PCI I/O Protocol 與父子 Handle 關係描述，因此 Handle 不應直接等同於 PCI BDF。
 
 常用服務及適用情境：
 
@@ -237,7 +259,30 @@ DXE 中的 Protocol 是由 GUID 識別的介面，安裝在 EFI Handle 上。一
 | Runtime Services | UEFI System Table 的 RuntimeServices | 開機期間與 OS Runtime | Variable、Time、Reset、Capsule、Virtual Address |
 | DXE Services | DXE Services Table | DXE | GCD Memory／I/O Space、FV、Dispatcher |
 
-#### 4.6.1 ExitBootServices 邊界
+#### 4.6.1 記憶體類型配置策略
+
+記憶體類型不是單純的分類名稱，它會影響 `ExitBootServices()` 後由誰管理、是否出現在 Runtime Map，以及 OS／ACPI 何時可以回收。配置時應先確認資料的**存活期間**與**接手者**，再選 Memory Type。
+
+| Memory Type | 適用內容 | 生命週期與注意事項 |
+|---|---|---|
+| `EfiBootServicesCode`／`EfiBootServicesData` | DXE／UEFI Boot Service Driver 的程式與資料 | ExitBootServices 後可由 OS 回收，不得被 Runtime 路徑引用 |
+| `EfiRuntimeServicesCode`／`EfiRuntimeServicesData` | ExitBootServices 後仍需執行或存取的 Runtime Driver／資料 | 必須保留給 Firmware，並納入 Runtime Memory Map 與虛擬位址轉換策略 |
+| `EfiACPIReclaimMemory` | ACPI Table、OS 解析完成前必須保留的 ACPI 資料 | OS 讀取並接手 ACPI Table 後可以回收；不適合放永久 Runtime 狀態 |
+| `EfiACPIMemoryNVS` | S3 Resume、平台韌體與 ACPI 需跨睡眠保留的狀態 | 一般不由 OS 當作可用 RAM；內容、完整性與 Resume 路徑需同步驗證 |
+| `EfiReservedMemoryType` | 不應交給一般 OS 配置器的保留實體區域 | 不代表自動具備 Runtime 可呼叫性；需清楚說明保留原因、屬性與擁有者 |
+| `EfiLoaderCode`／`EfiLoaderData` | UEFI Application／OS Loader | ExitBootServices 後由 OS Loader／OS 管理，不應拿來保存 Firmware Runtime 狀態 |
+
+配置判斷可依下列順序：
+
+1. ExitBootServices 後是否仍由 Firmware 存取？若是，評估 Runtime Code／Data。
+2. 是否為 ACPI Table，且 OS 解析完成後即可回收？若是，評估 `EfiACPIReclaimMemory`。
+3. 是否需跨 S3 保存，並由 Resume Firmware／AML 使用？若是，評估 `EfiACPIMemoryNVS`。
+4. 是否只是避免一般配置器使用？若是，才評估 `EfiReservedMemoryType`，並留下資源用途。
+5. 不要只因「資料很重要」就選 Runtime 或 Reserved。錯誤類型會增加 OS 保留記憶體、破壞 S3 Resume，或使 Runtime Pointer 轉換不完整。
+
+S4 通常由 OS 以休眠映像保存與恢復系統狀態，其資料契約與 S3 的 ACPI NVS 不完全相同。平台若支援 S3／S4，應分別驗證 Memory Map、ACPI Table、NVS 內容、Variable 與 Resume Flow。
+
+#### 4.6.2 ExitBootServices 邊界
 
 OS Loader 呼叫 `GetMemoryMap()` 取得 Memory Map 與 MapKey，再呼叫 `ExitBootServices()`。兩次呼叫之間若配置或釋放記憶體，MapKey 可能失效，因此 Loader 通常需要重新取得 Memory Map 後重試。
 
@@ -248,7 +293,7 @@ ExitBootServices 成功後：
 - Runtime Driver 只能依賴 Runtime Code／Data 與允許的 Runtime Services。
 - 事件、Protocol 或一般 Pool 指標若仍被 Runtime 路徑引用，可能造成轉址後失效。
 
-#### 4.6.2 Runtime Driver 注意事項
+#### 4.6.3 Runtime Driver 注意事項
 
 - 需要跨越 ExitBootServices 的函式與資料應放在正確 Runtime Memory Type。
 - 若 OS 進行虛擬位址切換，需處理 `SetVirtualAddressMap()` 相關轉址需求。
@@ -338,6 +383,30 @@ flowchart TD
 
 Log 應避免只輸出「成功／失敗」，至少保留階段、GUID、Handle、位址、長度、Attributes 與 `EFI_STATUS`。
 
+#### 4.8.4 Driver Binding 交叉比對矩陣
+
+當 `Start()` 失敗時，不要只從最後一筆錯誤往回猜測。建議同步比對 Driver 行為、Handle Database 與硬體狀態：
+
+| 比對面向 | 要確認的問題 | 建議證據 |
+|---|---|---|
+| `Supported()` 副作用 | 是否寫入暫存器、切換 BAR、配置資源或開啟 Protocol 後未還原 | `Supported()` 進出前後的 Register Dump、OpenProtocolInformation |
+| Protocol 開啟模式 | 是否誤用 `EFI_OPEN_PROTOCOL_EXCLUSIVE`，或已有其他 Agent 以 `BY_DRIVER` 開啟 | Agent／Controller／Attributes、`openinfo` 或 Core Debug Log |
+| Controller 能力 | `Start()` 需要的 Protocol 是否都位於同一 Controller Handle，或其實在 Parent／Child Handle | Device Path、Handle Protocol 清單、父子拓樸 |
+| 平台基礎 Driver | PCI Host Bridge、PCI Bus、IOMMU 或其他 Bus Driver 是否尚未完成資源配置 | Driver Binding 執行順序、PCI I/O 狀態、Resource Allocation Log |
+| 失敗回收 | `Start()` 中途失敗後是否逆序 Uninstall、Close 與 Free | 第二次 Connect 結果、配置計數與 Handle 差異 |
+
+UEFI Shell 可先使用下列方向縮小範圍，實際參數以平台 Shell 版本的 `help` 為準：
+
+```text
+dh                 # 列出 Handle Database
+dh -p <Protocol>   # 依 Protocol 篩選 Handle；不同 Shell 版本語法可能不同
+openinfo <Handle>  # 查看 Protocol 的 Open 關係
+drivers            # 查看 Driver Binding 與管理狀態
+devices            # 查看 Controller／Child 關係
+```
+
+建議以「正常平台／異常平台」或「第一次 Connect／第二次 Connect」做差異比對，並把 Handle 值視為單次開機內的識別值，不要假設跨開機固定。
+
 ### 4.9 實作與排查入口
 
 EDK II 常見查閱位置如下，實際路徑可能隨 branch 調整：
@@ -362,29 +431,7 @@ grep -R "InstallProtocolInterface\|OpenProtocol" -n --include='*.c' .
 grep -R "gEfiDriverBindingProtocolGuid" -n --include='*.inf' --include='*.c' .
 ```
 
-### 4.10 驗證與測試重點
-
-#### 4.10.1 測試矩陣
-
-| 類別 | 建議覆蓋 |
-|---|---|
-| 開機型態 | Cold Boot、Warm Reset、AC Cycle、S3 Resume（若支援） |
-| 韌體狀態 | 更新前、更新後、Recovery、設定恢復預設值 |
-| 平台差異 | 不同 SKU、記憶體容量、CPU Stepping、PCIe 裝置組合 |
-| 資源條件 | 低記憶體、裝置缺席、Protocol／PPI 延遲出現 |
-| 錯誤注入 | HOB 長度錯誤、PPI 缺席、Protocol 被占用、Start 中途失敗 |
-| OS 交接 | 多次 GetMemoryMap、ExitBootServices 重試、Runtime Variable／Reset |
-
-#### 4.10.2 Pass／Fail 判定
-
-- HOB List 可完整走訪，無零長度、越界、重疊或缺少結尾項目。
-- 必要 PPI 與 Protocol 在預期階段出現，Instance 數量符合平台設計。
-- Driver Binding 可完成 Connect、Disconnect、Reconnect，不殘留 Open 關係。
-- 所有失敗路徑可回收已配置資源及已安裝介面。
-- ExitBootServices 後無 Boot Services 存取，Runtime 功能在支援的 OS 上可重複執行。
-- Cold Boot、Warm Reset 與不同 SKU 的 Log 差異均可由設計解釋。
-
-### 4.11 安全性與相容性注意事項
+### 4.10 安全性與相容性注意事項
 
 - 將 HOB、Protocol 與 Runtime Service 的輸入視為跨信任邊界資料，檢查長度、版本、範圍與 Integer Overflow。
 - 不透過 GUID HOB、Variable 或一般 DEBUG Log 暴露金鑰、密碼、Token 或敏感量測資料。
@@ -393,7 +440,7 @@ grep -R "gEfiDriverBindingProtocolGuid" -n --include='*.inf' --include='*.c' .
 - Resource Descriptor 與 Memory Type 錯誤可能影響 DMA、記憶體保護與 OS 資源管理，需納入安全測試。
 - 規格版本、EDK II branch、Silicon Package 與編譯器版本應一併記錄，避免只比較**名稱相同但語意不同**的介面。
 
-### 4.12 本章檢查清單
+### 4.11 本章檢查清單
 
 - [ ] 已標示每個自訂 HOB 的 Producer、Consumer、GUID、Revision 與資料長度。
 - [ ] HOB List 邊界、對齊、End of HOB List 與資源重疊已驗證。
@@ -406,7 +453,7 @@ grep -R "gEfiDriverBindingProtocolGuid" -n --include='*.inf' --include='*.c' .
 - [ ] 已覆蓋 Cold Boot、Warm Reset、AC Cycle、更新前後及不同 SKU。
 - [ ] Log 可識別 GUID、Handle、Instance、Address、Length、Attributes 與 EFI_STATUS。
 
-### 4.13 本章重點
+### 4.12 本章重點
 
 - HOB 用於 PEI 到 DXE 的資料交接；PPI 與 Protocol 分別服務 PEI 與 DXE／UEFI 執行環境。
 - HOB 是資料契約，不應保存 Temporary RAM 指標，也不應取代需要持續互動的 Protocol。
@@ -415,7 +462,7 @@ grep -R "gEfiDriverBindingProtocolGuid" -n --include='*.inf' --include='*.c' .
 - ExitBootServices 是明確生命週期邊界，Runtime 路徑不可保留對 Boot Services Code／Data 的依賴。
 - 排查時先確認階段，再沿著 Producer、Database、Consumer、所有權與回收順序縮小範圍。
 
-### 4.14 參考資料
+### 4.13 參考資料
 
 - UEFI Forum, UEFI Specification: https://uefi.org/specifications
 - UEFI Forum, Platform Initialization Specification: https://uefi.org/specifications
@@ -424,3 +471,37 @@ grep -R "gEfiDriverBindingProtocolGuid" -n --include='*.inf' --include='*.c' .
 - 專案採用的 EDK II branch、Silicon Package、平台設計文件、Issue 與測試報告。
 
 > 規格名稱、函式名稱與欄位定義應以專案採用的 UEFI／PI Specification 及 EDK II branch 為準。本章提供可重複使用的 BIOS 移植與排查架構，不取代平台供應商文件。
+
+---
+
+## 附錄 A：驗證與測試檢查表
+
+### A.1 測試矩陣
+
+| 類別 | 建議覆蓋 |
+|---|---|
+| 開機型態 | Cold Boot、Warm Reset、AC Cycle、S3 Resume（若支援） |
+| 韌體狀態 | 更新前、更新後、Recovery、設定恢復預設值 |
+| 平台差異 | 不同 SKU、記憶體容量、CPU Stepping、PCIe 裝置組合 |
+| 資源條件 | 低記憶體、裝置缺席、Protocol／PPI 延遲出現 |
+| 錯誤注入 | HOB 長度錯誤、PPI 缺席、Protocol 被占用、Start 中途失敗 |
+| OS 交接 | 多次 GetMemoryMap、ExitBootServices 重試、Runtime Variable／Reset |
+
+### A.2 Pass／Fail 判定
+
+- HOB List 可完整走訪，無零長度、越界、重疊或缺少結尾項目。
+- 必要 PPI 與 Protocol 在預期階段出現，Instance 數量符合平台設計。
+- Driver Binding 可完成 Connect、Disconnect、Reconnect，不殘留 Open 關係。
+- 所有失敗路徑可回收已配置資源及已安裝介面。
+- ExitBootServices 後無 Boot Services 存取，Runtime 功能在支援的 OS 上可重複執行。
+- Cold Boot、Warm Reset 與不同 SKU 的 Log 差異均可由設計解釋。
+
+### A.3 測試紀錄欄位
+
+- BIOS／BMC／CPLD／EC 版本與 Git revision。
+- 主機板版本、CPU／SoC Stepping、記憶體與 PCIe 裝置組合。
+- Boot Mode、Reset Type、測試前置條件與重現率。
+- 第一個異常階段、Status Code、POST Code、Serial Log 時間點。
+- HOB／PPI／Protocol／Handle 差異，以及 Memory Map 與 Open 關係。
+- Pass／Fail 判定、已知限制、回歸範圍與附件位置。
+
