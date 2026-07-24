@@ -5,6 +5,8 @@
 
 修訂說明：Rev2 強化 PI 階段對照、Bring-up 最小可行初始化、Policy 衝突處理、Silicon Init 失敗資料收集，以及與 Chapter 4 HOB／PPI／Protocol 機制的銜接。
 
+Rev3 進一步補強 Boot Mode 路徑分流、初始化後健康狀態、Policy 動態更新窗口、Silicon Package 相容性檢查，以及 Silicon Trace 與 BIOS Log 的時間軸整合。
+
 ## 8.1 文件目的
 
 Chipset、PCH 與 SoC 初始化是平台由 Reset 狀態進入可執行後續韌體、裝置列舉及作業系統啟動環境的關鍵程序。本章目的如下：
@@ -108,6 +110,48 @@ DXE 階段通常負責裝置列舉、資源配置、ACPI／SMBIOS 資料建立�
 
 須特別注意：設定鎖定的時間點不可僅依「越早越安全」判斷。若鎖定過早，後續模組可能無法完成必要設定；若鎖定過晚，則可能增加設定遭非預期修改的風險。適當時點應依 Silicon 規格、平台資料流及安全設計共同決定。
 
+### 8.4.5 Boot Mode 路徑分流原則
+
+`BootMode`、Reset Cause 與更新狀態應在建立 Silicon Policy 前完成判斷，並成為初始化流程的第一層分流條件。各路徑不宜先執行共同的完整初始化，再於後段嘗試修正差異。
+
+#### Cold Boot／AC Cycle
+
+- 執行平台要求的完整 Pre-Memory 與 Post-Memory Silicon Init。
+- 建立新的記憶體、Host Bridge、DMI／Fabric、PCIe 與周邊狀態。
+- 重新解析 Board ID、Strap、Fuse 與需要在本次啟動生效的 Setup Variable。
+- 完成資源配置、錯誤狀態基線建立及 End-of-POST 鎖定。
+
+#### Warm Reset／Global Reset
+
+- 不應直接假設所有 Silicon 狀態均已清除，須依各暫存器的 Reset Domain 判斷保留範圍。
+- 若 Silicon Vendor 指定完整重新初始化，應依指定流程執行；若部分 Power Well、Link 或 Fabric 狀態保留，則應避免重複寫入 Write Once 或已鎖定欄位。
+- 保存並記錄 Reset Cause，以便區分正常重啟、Watchdog、錯誤復原與更新程序觸發的 Reset。
+
+#### S3 Resume
+
+- 優先從 ACPI NVS、S3 Boot Script 或 Silicon Vendor 定義的 Resume Context 還原必要設定。
+- 僅執行 Resume 所需的 PCH／SoC 恢復程序，例如必要的 Clock／Power 恢復、輕量 Link Retraining 與周邊 Context Restore。
+- 原則上跳過完整記憶體訓練、Host Bridge 資源重建、PCI Bus 重新編號與完整 DMI／Fabric 初始化，除非適用規格明確要求。
+- 不應重新解析會改變硬體拓樸的 Setup Variable，避免 Resume 前後的資源配置不一致。
+- 若偵測到 NVS 不完整、Policy Revision 不相容或 Silicon 狀態不可信，應依平台定義轉入安全的完整重啟路徑，而非持續使用可能失效的 Resume Context。
+
+#### Firmware Update 後重啟
+
+- 設定明確的 Update Pending／Update Complete 狀態，並在重啟早期驗證映像版本、完整性與更新結果。
+- 重新建立 SPI／Flash Region、Write Protection、Protected Range 與相關鎖定，不應假設更新前的保護暫存器狀態仍有效。
+- 若更新改變 Silicon Package、Policy Revision、Setup Schema 或 NVRAM 格式，應執行相容性檢查與必要的設定遷移。
+- 更新成功、失敗復原與斷電後首次啟動應分別定義 Boot Path、Log 與 Pass／Fail 條件。
+
+#### 建議的路徑決策 Log
+
+```text
+BOOT_PATH: Mode=S3Resume ResetCause=WakeFromS3
+PolicyRevision=0x03 ResumeContext=Valid
+FullSiliconInit=Skip DmiRestore=Required ResourceReallocation=Skip
+```
+
+文件與程式審查時，建議為每個初始化模組標示 `Run`、`Restore`、`Skip` 或 `Reinitialize`，並對 Cold Boot、Warm Reset、S3 Resume、Recovery 與 Update 後重啟建立路徑矩陣。
+
 ## 8.5 PCH／SoC 初始狀態與初始化階段
 
 ### 8.5.1 初始狀態盤點
@@ -187,6 +231,36 @@ Policy 在 PEI 階段通常透過 PPI 提供服務，並以 GUID HOB 傳遞已�
 6. 在送入 Silicon Init 前進行一致性檢查。
 
 若不同資料來源產生衝突，不應僅以最後寫入值作為規則。應確認硬體能力、安全限制與產品需求，並在 Log 中記錄最終值及其來源。
+
+#### Policy 動態更新窗口
+
+Policy 合併應在平台定義的提交點前完成。多數平台可將 PEI Post-Memory 初期、DMI／Fabric 初始化及 PCIe 資源配置之前，視為會影響拓樸之 Policy 的最後更新窗口；實際時間點仍須依 Silicon Vendor 流程確認。
+
+下列欄位一旦進入 Silicon Init、Host Bridge Window 建立或 PCIe 資源配置後，原則上不得於同一次 Boot 動態變更：
+
+- Controller／Root Port Enable Mask
+- Lane Ownership、Bifurcation 與 Link Width
+- BAR Size、Resizable BAR、Above 4G Decoding 與 MMIO Window
+- Interrupt Routing、DMA Remapping 與 Reserved Memory
+- 會改變 ACPI Namespace 或 PCI 拓樸的功能選項
+- 需要重新訓練 Link 或重新配置 Clock／Power／Reset 的選項
+
+若使用者於 Setup 修改上述欄位，應採用下列其中一種策略：
+
+1. 將新值保存為 `Pending Policy`，在下一次符合條件的 Cold Boot 套用。
+2. 顯示「重新啟動後生效」，並由平台觸發受控重啟以重新建立資源。
+3. 若變更需要 AC Cycle、Global Reset 或清除特定 Context，應明確提示並由平台流程處理。
+4. 若目前 Boot Path 為 S3 Resume 或 Firmware Update 中間狀態，延後套用並保留原因紀錄。
+
+建議區分三種值：
+
+```text
+RequestedValue = 使用者或管理介面要求的值
+CommittedValue = 本次 Boot 提交給 Silicon Init 的值
+EffectiveValue = 經硬體限制與初始化結果修正後的實際值
+```
+
+在 Policy 提交後收到新的設定要求時，不應修改已提交的記憶體副本。應建立 Pending 狀態、要求適當 Reset，並於下一個允許窗口重新合併。如此可避免 Setup 顯示值、Silicon 實際狀態與 ACPI／PCI 資源描述彼此不一致。
 
 #### 實例：PCIe Root Port Enable 衝突處理
 
@@ -328,6 +402,45 @@ IOMMU 用於限制 DMA 裝置可存取的記憶體範圍。BIOS 的主要責任�
 
 對支援大型 BAR、Above 4G Decoding、SR-IOV 或多層 PCIe Switch 的平台，應預留足夠資源並測試最大裝置組合。
 
+### 8.9.4 初始化後的 Silicon 健康狀態檢查
+
+主要初始化完成後、End-of-POST 鎖定與 OS 交接前，建議由單一模組聚合 Silicon 與高速 I/O 的健康狀態。目的不是將所有錯誤一律清除，而是先建立可追蹤的 POST 錯誤基線，再依嚴重度、所有權及規格決定保留、回報、清除或停止啟動。
+
+建議觀測項目包括：
+
+- PCIe Root Port AER Correctable、Uncorrectable 與 Root Error Status
+- DMI／Fabric／Internal Bus 的 Link、Protocol、Replay、Timeout 或 Overflow 狀態
+- Host Bridge、IOMMU、DMA Remapping 與相關 Fault Status
+- 內建控制器的初始化失敗、Parity／ECC 或 Firmware Status
+- Link Training Retry、降速、降寬與 Recovery 次數
+- 平台供應商指定的 Machine Check、WHEA 預備資料或錯誤摘要
+
+#### 建議處理順序
+
+1. **快照**：在任何清除動作前，讀取原始狀態、Error Source、Requester ID、Severity、First Error Pointer 與必要的 Header Log。
+2. **關聯**：將錯誤與 Boot Path、Port、BDF、初始化階段、Link Training 結果及時間戳記關聯。
+3. **分類**：區分預期的訓練暫態、Silicon Errata、可糾正錯誤、不可糾正非致命錯誤與致命錯誤。
+4. **決策**：依平台策略選擇繼續、降速／停用裝置、重新訓練、觸發 Recovery，或停止 Boot。
+5. **保存**：將摘要寫入可供後續 DXE、BERT／WHEA、BMC SEL 或維修工具取得的資料結構，避免只留在易失性 Serial Log。
+6. **清除**：僅對規格允許且已保存的 W1C／RW1C 狀態進行清除，並再次讀回確認。對 Clear-on-Read、Sticky、Fatal 或由 OS／SMM 擁有的狀態不可套用通用清除程序。
+
+#### 錯誤聚合器輸出
+
+建議以 GUID HOB 或平台定義的資料結構傳遞健康摘要，DXE 再依需求轉換為 Protocol、ACPI Error Record 或維修紀錄。至少應包含：
+
+```text
+BootPath, ResetCause, Timestamp
+ErrorSource, Segment:Bus:Device.Function
+Severity, StatusBits, FirstErrorPointer
+LinkSpeed, LinkWidth, TrainingRetryCount
+ActionTaken, ClearResult, ErrataReference
+SiliconStepping, PackageVersion, BIOSBuildId
+```
+
+#### 清除與 OS 交接邊界
+
+POST 階段的暫態錯誤若未清除，可能在 OS 接管後被視為新錯誤；但若未先保存證據就清除，也會失去板級訊號、Link Training 或 Silicon 問題的線索。因此應由平台定義每一類 Status Register 的擁有者、快照時間、清除時點及 OS 交接方式。已知 Errata 也應以明確的條件判斷處理，不宜使用「看到特定位元就忽略」的通用規則。
+
 ## 8.10 Lockdown、End-of-POST 與設定鎖定
 
 ### 8.10.1 鎖定目標
@@ -393,6 +506,40 @@ Stepping 差異可能影響暫存器定義、初始化順序、功能支援與 W
 - BMC／EC／CPLD 版本，若與平台初始化有相依。
 - 使用的規格與 Errata 版本。
 
+### 8.11.4 Silicon Package 相容性檢查
+
+更新 FSP、AGESA、Silicon Library、Binary Package 或其同類元件時，不應只確認能否編譯與進入 OS。更新流程應包含介面、Policy、預設值、執行路徑與輸出資料的相容性檢查。
+
+#### 更新前靜態檢查
+
+- 比對新舊版本的 Policy Header、Revision、`sizeof()`、欄位偏移、Alignment 與 Reserved Field。
+- 比對 Enumeration 數值、Bit Mask、Default Value、Deprecated Item 與新增欄位。
+- 確認專案內所有 Policy Override 仍指向相同語意，沒有因欄位改名或重新排列而寫入錯誤位置。
+- 檢查 Library Class、PPI、Protocol、HOB GUID、API Prototype 與回傳狀態是否變更。
+- 閱讀 Release Notes 中的 Breaking Changes、Integration Notes、Known Issues、New Defaults 與適用 Stepping。
+
+只有 `sizeof()` 相同不足以證明相容，因為欄位語意、列舉值或預設值仍可能改變；同樣地，結構變長也不代表既有欄位必然不相容。應同時驗證版本標頭、欄位定義與實際 Dump。
+
+#### 進入 Silicon Init 前的防護
+
+建議加入只在開發或驗證版本啟用的 `ValidateSiliconPolicy()` 類型檢查，至少確認：
+
+- Policy Revision 與 Silicon Package 支援版本一致。
+- 結構長度、Buffer Boundary 與必要子結構存在。
+- PCIe Enable Mask、Lane Configuration、BAR Size、MMIO Window 與 IOMMU 設定在允許範圍。
+- Board／SKU 不支援的功能未被啟用。
+- 相依欄位沒有互斥或缺漏。
+
+檢查失敗時，開發版本可停止在明確檢查點並輸出差異；量產版本則應依風險採安全預設值、停用受影響功能或進入 Recovery，且必須留下可追蹤紀錄。
+
+#### 更新後動態驗證
+
+- 在相同硬體與 Setup 條件下保存新舊版本的最終 Policy Dump，執行欄位級差異比較。
+- 比對 PCI 拓樸、ACPI Table、Memory Map、Link Speed／Width、啟動時間與健康狀態摘要。
+- 覆蓋 Cold Boot、Warm Reset、S3 Resume、Firmware Update 後首次啟動及 Recovery。
+- 對 Release Notes 宣告的新預設值建立顯式測試，避免無聲改變產品行為。
+- 若版本回退受支援，驗證新版本寫入的 NVRAM／Context 是否可由舊版本安全解析；否則應定義拒絕降版或清除／遷移策略。
+
 ## 8.12 驗證與測試重點
 
 ### 8.12.1 測試環境
@@ -435,6 +582,43 @@ Stepping 差異可能影響暫存器定義、初始化順序、功能支援與 W
 - 關鍵暫存器 Before／After Dump。
 - OS Event Log、Kernel Log 或裝置管理資訊。
 - 失敗與正常樣本的差異比較。
+
+### 8.12.5 與 Silicon Debug 工具的協同
+
+當 Serial Log 只能顯示結果，無法呈現 Link Training、Fabric State Machine、Power Transition 或內部錯誤來源時，應使用 Silicon Vendor 支援且適用於該平台的 Trace 機制，例如 Trace Hub、UART over eSPI、Vendor Training Log、SMU／PMU Debug、JTAG 或平台專屬 Trace Port。工具名稱、可用性與存取權限依供應商、SKU 及產品安全狀態而異。
+
+#### Trace 啟用原則
+
+- 在開發 BIOS 保留由 Build Flag、受控 Setup 選項或簽章 Debug Policy 啟用 Trace 的機制。
+- 量產版本預設關閉，並確認 Debug Interface、Trace Buffer 與解鎖路徑符合產品 Threat Model。
+- 啟用 Trace 時記錄 Buffer Size、輸出介面、事件遮罩、觸發條件及是否影響時序。
+- 先以最小事件集合重現問題，再逐步增加 Trace 類別，避免大量資料改變問題時序或造成關鍵事件被覆寫。
+
+#### 建立共同時間軸
+
+Silicon Trace、POST Code 與 Serial Log 應具有可對齊的同步點。可在呼叫重要 Silicon API 前後寫入相同的 Marker ID，並同時輸出至 Serial、POST Code 與 Trace Channel。
+
+```text
+T+000123456 us POST=0x4A TRACE_MARKER=0x104A API=DmiInit Phase=Enter
+T+000126902 us POST=0x4B TRACE_MARKER=0x104B API=DmiInit Phase=Exit Status=EFI_SUCCESS
+```
+
+若不同資料源使用不同 Clock Domain，應記錄各自的頻率、起始點、Wrap-around 條件與同步 Marker。分析時應先校正時間軸，再判斷事件的先後關係。
+
+#### Raw Data 的可重現性
+
+每份 Trace 應一併保存：
+
+- 原始 Binary／Raw Data，不只保存解碼後文字。
+- Decoder／Analysis Tool 名稱與版本。
+- Symbol、Register Dictionary、配置檔與事件定義版本。
+- Silicon Package、Microcode、Stepping、Board 與 BIOS Build ID。
+- 擷取起訖條件、Buffer 模式、事件遮罩與觸發方式。
+- 與該次擷取對應的完整 Serial Log、POST Code 與 Policy Dump。
+
+#### 工具侵入性檢查
+
+Trace、JTAG Halt、額外 UART 輸出或高層級 Debug Log 可能改變 Boot Timing、Watchdog 行為、Power State 或 Link Training 結果。若問題只在 Trace 開啟或關閉時出現，應將此差異視為觀測結果的一部分，並使用較低侵入性的事件遮罩、較大 Buffer 或硬體 Trigger 重新驗證。
 
 ## 8.13 常見問題與排查方向
 
