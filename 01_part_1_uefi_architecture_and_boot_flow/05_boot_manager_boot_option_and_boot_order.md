@@ -428,17 +428,18 @@ flowchart TD
 
 FAT 檔名比對一般不區分大小寫，因此大小寫外觀通常不是首要原因；但仍應確認實際目錄、檔名與路徑字元完整，避免隱藏字元、非預期副檔名或複製流程造成的差異。
 
-建議觀測流程：
+建議依下表逐層觀測。每一層的成功結果，都是進入下一層的前置條件：
 
-```text
-Device Handle
-  -> Block I/O 是否存在
-  -> Partition Handle 是否建立
-  -> Simple File System 是否可開啟
-  -> 預設 Loader 是否存在
-  -> LoadImage() 回傳值
-  -> Image Authentication 結果
-```
+| 檢查項目 | 失敗時典型外觀 | 下一步排查方向 |
+|---|---|---|
+| `Block I/O` | `map -r` 看不到對應檔案系統映射，或 `devices` 中找不到預期的 Block I/O Handle | 檢查 Controller 枚舉、Driver Binding、`ConnectController()`、USB／Storage 初始化與 Fast Boot Policy |
+| Partition Handle | 裝置 Handle 存在，但沒有預期的 Hard Drive Media Device Path 節點或 Partition Handle | 檢查 Partition Table、GPT Header／Entry、MBR、媒體狀態與 Partition Driver |
+| `Simple File System` | Partition Handle 已建立，但無 Simple File System Protocol，或 `OpenVolume()` 回傳錯誤 | 檢查 FAT 檔案系統格式、檔案系統損毀、File System Driver 與媒體讀取錯誤 |
+| 架構預設 Loader | 可開啟 Volume，但找不到 `\EFI\BOOT\BOOTX64.EFI`、檔案大小為 0，或路徑內容不完整 | 檢查預設路徑、檔案複製結果、CPU 架構、檔案完整性與 Virtual Media 內容 |
+| `LoadImage()` | 回傳 `EFI_NOT_FOUND`、`EFI_LOAD_ERROR`、`EFI_SECURITY_VIOLATION` 或其他錯誤 | 依 5.7.2 檢查 Device Path、PE／COFF 格式、Machine Type、資源與安全政策 |
+| Image Authentication | 出現 Secure Boot Violation Log、簽章鏈不受信任，或 image hash／certificate 命中 `dbx` | 檢查 Secure Boot Mode、`db`、`dbx`、簽章鏈、撤銷狀態與平台驗證政策 |
+
+需注意，`map -r` 顯示的是 UEFI Shell 可建立的檔案系統映射，不是 Block I/O Protocol 的完整清單。若 `map -r` 沒有映射，仍應搭配 `devices`、Handle／Protocol Dump 與韌體 Debug Log，判斷問題位於 Block I/O、Partition 或 Simple File System 哪一層。
 
 ### 5.4.3 固定磁碟與可移除媒體
 
@@ -881,7 +882,7 @@ flowchart TD
 | SKU | 各 Board Revision、NIC／Storage 組合、客戶設定 |
 
 
-## 平台例外註記
+### 5.8.9 平台例外註記
 
 第五章的流程與測試門檻需依產品型態調整，但例外條件應在平台設計文件與測試報告中明確留下依據：
 

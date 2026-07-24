@@ -269,6 +269,25 @@ Silicon Package┘
 
 若 Platform Package 同時被 Board Package 與 Silicon Package 低層 library 反向引用，容易形成循環相依。可將共用介面抽到較低層的 `CommonPkg`，但 CommonPkg 僅應保存穩定介面與共用資料型別，不宜成為所有內容的集中區。
 
+當跨層服務無法僅靠單向 library dependency 表達時，應優先採用**抽象介面**，例如 callback、PPI 或 Protocol，而不是讓高低層 package 彼此引用。介面由需求方或中立的 CommonPkg 定義，Board／Platform 提供 instance，Silicon consumer 只依賴抽象契約。
+
+例如，若 Silicon 初始化需要取得由主機板電路決定的 GPIO 狀態，可定義下列 PEI PPI：
+
+```c
+typedef
+EFI_STATUS
+(EFIAPI *PLATFORM_GPIO_READ) (
+  IN  UINT32 GpioId,
+  OUT UINT32 *Value
+  );
+
+typedef struct {
+  PLATFORM_GPIO_READ Read;
+} PLATFORM_GPIO_SERVICES_PPI;
+```
+
+由 Board Package 實作並安裝 `PLATFORM_GPIO_SERVICES_PPI`，Silicon Package 僅透過 PPI 取得資料。介面定義、安裝時機、failure behavior 與是否允許 fallback 都必須明確；否則只是將直接相依轉成難以追蹤的執行期相依。
+
 ## 6.4 Silicon Policy 的建立、更新與下傳
 
 ### 6.4.1 Policy 生命週期
@@ -393,6 +412,15 @@ FSP UPD／AGESA parameter／Vendor Silicon Init API
 7. SMM、power management、sleep／resume。
 
 每次僅導入一組可觀測的功能，保留前一階段可用 image 作為對照。
+
+> **暫時性 Workaround 管理：** Bring-up 初期若因 Silicon errata、板級 ECO 尚未完成或硬體時序未穩定而加入 workaround，應集中放在 `CompanySiliconPkg` 的專用 Library，或透過明確的 Policy Override 套用。原始碼須標記 issue、適用範圍與移除條件，例如：
+>
+> ```c
+> // WORKAROUND: FW-1234, required for A0 stepping.
+> // Remove after Silicon Rev.B0 or vendor package v2.4.
+> ```
+>
+> 若 workaround 僅適用特定 Board／Fab Revision，Board Package 應只提供條件或資料，由集中管理的 workaround layer 執行，避免相同修正散落於多個 Board library。CI 或 release review 應列出仍有效的 workaround，確認 owner、期限與回歸範圍。
 
 ### 6.5.6 階段 5：產品功能與安全設定
 
@@ -624,6 +652,8 @@ build -a X64 -t GCC5 -b DEBUG \
 | AutoGen／Makefile | EDK II 展開後的建置資訊 | 巨集、include、library resolution |
 | AsBuilt INF | module 實際使用的 package、library、PCD | 與設計預期是否一致 |
 
+> **除錯符號歸檔：** Release Build 對應的 MAP、DWARF／ELF、PDB 或 toolchain 產生的同等符號資料，應與 BIOS image、source revision、toolchain 版本及 binary hash 一起上傳至受控的 artifact server。即使最終映像已移除符號，也不可只保存 stripped binary。當 OS、BMC、SMM exception handler 或 crash dump 回報位址時，必須使用同一版映像對應的符號，才能將位址反查至 module、函式與原始碼行；不同 build 的符號不可混用。保存期限與讀取權限應符合產品支援及安全政策。
+
 ### 6.9.3 驗證模組是否被建入
 
 排查順序：
@@ -766,6 +796,8 @@ grep -R "BoardInitLib" Build/BoardA/DEBUG_GCC5 | head
 
 ## 6.12 安全性與相容性注意事項
 
+前面章節建立了 Package 的分工與資料流，但尚未集中討論**信任邊界（Trust Boundary）**與**失敗容錯（Fault Tolerance）**。當 Package 間傳遞的資料會影響安全政策、硬體保護、韌體更新或持久化儲存時，除了功能正確性，還須納入輸入驗證、權限、版本相容與失敗復原等防禦性設計。
+
 ### 6.12.1 信任邊界
 
 - Board ID 或 manufacturing data 若可被外部匯流排修改，不應未驗證即決定安全政策。
@@ -804,6 +836,8 @@ grep -R "BoardInitLib" Build/BoardA/DEBUG_GCC5 | head
 - [ ] 受影響的 Board、Fab Revision、SKU 與 stepping 已完成回歸。
 - [ ] patch 已記錄問題、原因、影響範圍、測試與移除條件。
 - [ ] 安全、flash size、boot time、相容性與回復能力已評估。
+- [ ] 所有暫時性 workaround 均有 issue、owner、適用版本與移除條件。
+- [ ] Release image 對應的 MAP／DWARF／PDB 等除錯符號已與版本資訊一併歸檔。
 
 ## 6.14 本章重點
 

@@ -3,6 +3,8 @@
 狀態：Draft  
 文件用途：本章說明 BIOS 在 Chipset、PCH 與 SoC 初始化期間的主要責任、資料來源、執行順序、驗證方式與問題排查方向。平台專屬的暫存器位址、Policy 欄位、Silicon Stepping、Errata 與工具版本，仍須由章節負責人依實際專案補充及驗證。
 
+修訂說明：Rev2 強化 PI 階段對照、Bring-up 最小可行初始化、Policy 衝突處理、Silicon Init 失敗資料收集，以及與 Chapter 4 HOB／PPI／Protocol 機制的銜接。
+
 ## 8.1 文件目的
 
 Chipset、PCH 與 SoC 初始化是平台由 Reset 狀態進入可執行後續韌體、裝置列舉及作業系統啟動環境的關鍵程序。本章目的如下：
@@ -65,7 +67,7 @@ Chipset、PCH 與 SoC 初始化是平台由 Reset 狀態進入可執行後續韌
 
 PCH／SoC 初始化通常跨越多個 BIOS 階段。實際分工會因平台架構與 Silicon Package 而異，但可概略區分如下。
 
-### 8.4.1 Reset 與早期環境建立
+### 8.4.1 Reset 與早期環境建立（SEC／PEI Pre-Memory）
 
 系統離開 Reset 後，CPU 從 Reset Vector 開始執行。此時可使用的記憶體與服務有限，早期程式應避免依賴尚未初始化的 DRAM、PCIe 裝置或完整 UEFI Service。
 
@@ -78,7 +80,7 @@ PCH／SoC 初始化通常跨越多個 BIOS 階段。實際分工會因平台架�
 5. 執行與記憶體初始化具有前置相依的 PCH／SoC 設定。
 6. 保留足以分析早期失敗的 POST Code、Serial Log 或 Trace Hub 資訊。
 
-### 8.4.2 Pre-Memory 初始化
+### 8.4.2 Pre-Memory 初始化（PEI）
 
 Pre-Memory 階段只應設定記憶體初始化前必須完成的項目。常見內容包括：
 
@@ -89,7 +91,7 @@ Pre-Memory 階段只應設定記憶體初始化前必須完成的項目。常見
 
 設計時應明確記錄每一項 Pre-Memory 設定的必要性。若某設定可延後至 Post-Memory，通常應避免放在早期階段，以降低早期流程複雜度與除錯成本。
 
-### 8.4.3 Post-Memory 初始化
+### 8.4.3 Post-Memory 初始化（PEI Post-Memory／DXE Early）
 
 DRAM 可用後，BIOS 可建立較完整的資料結構並執行後續初始化，例如：
 
@@ -100,7 +102,7 @@ DRAM 可用後，BIOS 可建立較完整的資料結構並執行後續初始化�
 - 準備 Interrupt、DMA、IOMMU 與資源配置。
 - 將 Silicon 初始化結果透過 HOB 或其他介面傳遞至 DXE。
 
-### 8.4.4 DXE、BDS 與 End-of-POST
+### 8.4.4 DXE、BDS 與 End-of-POST（DXE／BDS）
 
 DXE 階段通常負責裝置列舉、資源配置、ACPI／SMBIOS 資料建立及平台服務安裝。接近 End-of-POST 時，BIOS 應完成需要在交付作業系統前執行的鎖定與安全設定。
 
@@ -136,6 +138,24 @@ DXE 階段通常負責裝置列舉、資源配置、ACPI／SMBIOS 資料建立�
 
 對於每一種路徑，應確認哪些設定會保留、哪些狀態會被清除，以及是否需要重新初始化或避免重複初始化。
 
+### 8.5.3 Bring-up 最小可行初始化檢查表
+
+新板首次上電時，目標不是立即完成所有周邊與安全設定，而是先建立一條可觀察、可重複且可逐步擴充的最小啟動路徑。下列項目可作為第一階段檢查表，實際順序仍應依 Silicon Vendor 的最小初始化序列及平台電源設計調整。
+
+- [ ] 確認電源時序、主要 Clock 與 Reset 訊號符合平台規格。
+- [ ] 確認 Reset Vector 可執行，並可由 SPI Flash、Boot ROM 或指定啟動媒體取得第一段指令。
+- [ ] 確認 Boot Block／SEC Entry 可到達，並配置可辨識的 POST Code 或最早期觀測點。
+- [ ] 設定 Early Debug UART 所需的 Clock、Power、GPIO／Pin Mux、Base Address 與 Baud Rate。
+- [ ] 輸出第一筆固定格式 Serial Log，內容至少包含建置版本與目前執行階段。
+- [ ] 讀取並驗證 Board ID、Fab ID、Strap、Fuse、SKU 與 Silicon Stepping。
+- [ ] 初始化 PCH／SoC 必要的基礎 Clock、Power Well、Reset Domain 與 Fabric 前置條件。
+- [ ] 啟用 SPI、eSPI 或 LPC 等啟動媒體所需介面，若平台架構需要。
+- [ ] 確認至少一個 Boot Device 可穩定讀取，並驗證映像檔範圍與基本完整性。
+- [ ] 建立最小 Pre-Memory Silicon Policy，只開啟記憶體初始化及 Debug Path 所必需的功能。
+- [ ] 進入記憶體初始化前，保存 Policy 摘要、Reset Cause、Board／Silicon 識別資訊及最後檢查點。
+
+建議將第一個 Bring-up 里程碑定義為：「每次上電皆可穩定到達相同檢查點，並輸出可辨識的 Serial Log」，而不是一次開啟所有控制器。若尚無 Serial 輸出，應以 POST Code、GPIO Toggle、Trace Port 或邏輯分析儀建立替代觀測點。
+
 ## 8.6 Silicon Policy、Strap 與 Fuse 的資料來源
 
 ### 8.6.1 Policy 資料來源
@@ -151,6 +171,10 @@ Silicon Policy 可能由多個來源組成：
 - 安全策略、產品需求及功能授權狀態。
 - BMC 或其他管理控制器提供的平台資訊，若平台設計有此相依。
 
+Policy 在 PEI 階段通常透過 PPI 提供服務，並以 GUID HOB 傳遞已解析的平台資訊或 Silicon 初始化結果；進入 DXE 後，則可依模組責任轉換為 Protocol，或由適當的 Dynamic PCD 提供設定。各專案應明確定義資料的擁有者、建立時間與有效生命週期。
+
+為維持單一事實來源，DXE 模組原則上不應各自重新解析 Strap、Fuse 或 Board ID。若這些資訊已由 PEI 建立並放入 HOB，DXE 應使用該 HOB 或由其衍生的 Protocol。如此可降低 Cold Boot、Warm Reset、S3 Resume 與 Recovery 路徑採用不同 Policy 的風險。HOB、PPI 與 Protocol 的責任、生命週期及使用方式，請參閱 Chapter 4。
+
 ### 8.6.2 優先順序與衝突處理
 
 專案應定義 Policy 的合併順序。例如：
@@ -163,6 +187,26 @@ Silicon Policy 可能由多個來源組成：
 6. 在送入 Silicon Init 前進行一致性檢查。
 
 若不同資料來源產生衝突，不應僅以最後寫入值作為規則。應確認硬體能力、安全限制與產品需求，並在 Log 中記錄最終值及其來源。
+
+#### 實例：PCIe Root Port Enable 衝突處理
+
+假設 Board ID 或平台連接表顯示 PCIe Root Port 4 未接線，或 Silicon Fuse 表示該 Port 不可使用，但 Setup Variable 因使用者設定、版本遷移或 NVRAM 資料異常而要求啟用。建議依下列方式處理：
+
+1. 先確認 Fuse、SKU 與 Silicon 能力。硬體不支援的功能不得由 Setup 覆寫。
+2. 再確認 Board Routing、Lane Ownership、Clock、Reset、Power 與 Pin Mux。板級未連接或資源已分配給其他功能時，應強制停用。
+3. 僅在硬體與板級條件均允許時，才接受產品預設值或 Setup Variable 的啟用要求。
+4. 將 Requested Value、Effective Value、限制來源及判斷理由寫入 Debug Log。
+5. Setup 畫面應呈現實際有效狀態，例如「Disabled by hardware configuration」，避免選單顯示 Enabled，但硬體實際未啟用。
+6. 若偵測到 NVRAM 欄位超出範圍或版本不相容，應採安全預設值並留下可追蹤紀錄，不應將未驗證資料直接寫入 Silicon Policy。
+
+建議 Log 格式：
+
+```text
+POLICY_CONFLICT: RP4 Requested=Enabled Effective=Disabled
+Source=Setup Constraint=BoardRouting BoardId=0x03 PolicyRevision=0x02
+```
+
+此判斷方式同樣適用於 USB Port、SATA Controller、Integrated LAN、Debug Interface 與其他會受 Fuse、Board Routing 或安全策略限制的功能。
 
 ### 8.6.3 Policy 驗證
 
@@ -404,6 +448,62 @@ Stepping 差異可能影響暫存器定義、初始化順序、功能支援與 W
 4. Silicon Init 回傳狀態與 Assert 資訊。
 5. 是否套用錯誤的 SKU、Stepping 或 Board 設定。
 6. 最近變更是否涉及記憶體前置條件或 Write Once 暫存器。
+
+#### 8.13.1.1 Silicon Init 失敗的除錯路徑與資料收集
+
+當 Silicon Init API 回傳失敗或系統停在 API 內部時，建議依「先保存證據、再縮小差異、最後驗證假設」的順序處理。
+
+1. **固定失敗位置**
+   - 記錄呼叫的 API 名稱、進入與離開檢查點。
+   - 保存完整 `EFI_STATUS`、Vendor Status、Assert 資訊與 `DEBUG_ERROR`／`DEBUG_WARN` 輸出。
+   - 確認錯誤發生於 API 呼叫前、API 內部，或 API 返回後的資料處理。
+
+2. **建立可重現條件**
+   - 記錄 Cold Boot、Warm Reset、AC Cycle 或 Resume 路徑。
+   - 固定 BIOS、Silicon Package、Microcode、Board、SKU、Stepping 與 Setup 設定。
+   - 至少重複測試三次，確認檢查點與錯誤碼是否一致。
+
+3. **保存最終 Policy Dump**
+   - Dump 送入 Silicon Init 前的最終結構，而非只保存 Default Policy。
+   - 標示 Policy Revision、結構大小、來源與每一層 Override。
+   - 過濾可能包含金鑰、認證資料或其他敏感資訊的欄位。
+
+4. **與已知可開機版本進行差異比較**
+   - 比對 Default、Board、Setup 合併後的最終 Policy。
+   - 比對 Silicon Package、Microcode、PCD、Setup Default 與 Board Detection 結果。
+   - 將差異依 Clock／Power、Lane／Port、Memory Dependency、Security 與 Debug 類別分組，避免一次回退大量無關變更。
+
+5. **檢查初始化時序與暫存器屬性**
+   - 確認是否有 Write Once、Lockable 或具有 Side Effect 的暫存器被提前或重複寫入。
+   - 確認呼叫順序、前置 Clock／Power／Reset 條件及必要 PPI 是否符合 Silicon 規格。
+   - 比對失敗前後的關鍵暫存器，但避免在文件未允許的時間點讀取具有 Clear-on-Read 等副作用的欄位。
+
+6. **核對供應商文件與版本資訊**
+   - 查閱目前 Silicon Package 的 Release Note、Integration Guide、錯誤碼定義及適用 Errata。
+   - 確認 Policy 結構版本與 Binary／Library 版本相容。
+   - 不應直接以其他 Stepping 或不同 Package 版本的錯誤碼說明進行判斷。
+
+7. **保存 Vendor Trace**
+   - 若平台支援 Training Log、Trace Hub、Status Code 或供應商專用 Trace，應保存原始輸出及擷取條件。
+   - 提交給 Silicon Vendor／FAE 時，應一併提供最小重現步驟、完整版本矩陣、Policy Dump、Serial Log、Trace 與正常／異常版本的差異摘要。
+
+建議保存下列最小資料包：
+
+```text
+Failure stage and API name
+EFI_STATUS and vendor status
+Boot path and reset cause
+BIOS build ID and commit ID
+Silicon package and microcode version
+Board ID, SKU, stepping and BOM revision
+Final merged policy dump
+Full serial log and POST code history
+Training log or Trace Hub output
+Last-known-good comparison summary
+Reproduction rate and exact steps
+```
+
+若 API 沒有返回，仍應區分「無輸出但 CPU 持續執行」、「發生 Reset」、「觸發 Watchdog」、「進入 Dead Loop」與「硬體停止回應」等現象，因為各自需要的觀測工具與後續排查方向不同。
 
 ### 8.13.2 裝置未出現在 PCI／ACPI
 
