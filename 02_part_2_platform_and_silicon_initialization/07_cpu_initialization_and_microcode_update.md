@@ -1,6 +1,6 @@
 # 7. CPU 初始化與微碼更新
 
-狀態：Draft  
+狀態：Approved  
 文件用途：本章以 BMC 第七章的章節編排方式作為寫作架構參考，但內容僅聚焦 BIOS 的 CPU 初始化與微碼更新，不沿用 BMC／Yocto／BitBake／DTS 等技術內容。CPU 型號、Silicon Package、PCD、MSR、暫存器、微碼版本及平台流程仍須由章節負責人依專案補充與驗證。
 
 ## 適用範圍
@@ -359,6 +359,7 @@ CPU 功耗管理可包含 P-State、C-State、Turbo／Boost、Energy Performance
 [CPU] Platform ID           : <value>        // 7.2.2
 [CPU] Microcode before      : <value>        // 7.2.3
 [CPU] Selected patch        : <value>        // 7.2.3
+[CPU] Patch buffer address  : <value>        // 7.2.2.1，選填
 [CPU] Microcode after       : <value>        // 7.7.1
 [CPU] Expected processors   : <value>        // 7.5.2
 [CPU] Enabled processors    : <value>        // 7.5.2 / 7.5.3
@@ -367,7 +368,7 @@ CPU 功耗管理可包含 P-State、C-State、Turbo／Boost、Energy Performance
 [CPU] Feature policy result : <status>       // 7.3.3
 ```
 
-Release BIOS 是否輸出完整識別值與位址資訊，應依產品 Debug 與資訊揭露政策調整。
+Release BIOS 是否輸出完整識別值與位址資訊，應依產品 Debug 與資訊揭露政策調整。Patch Buffer Address 屬於選填診斷資訊，量產版本是否保留應由產品安全與除錯政策決定。
 
 ## 7.10 安全性與相容性
 
@@ -406,6 +407,8 @@ Microcode 僅應來自 CPU 供應商或核准管道，並保存原始套件版�
 | Watchdog Reset | `<待確認>` | `<待確認>` | `<待確認>` | 依 Watchdog Reset 類型處理 | `<待填>` |
 | Recovery Boot | 依進入前 Reset 而定 | 依平台而定 | 需建立可用 CPU 環境 | 使用 Recovery 相容微碼 | `<待填>` |
 
+「驗證結果」建議填入 Pass／Fail 或具體觀測值，例如微碼版本、AP 數量、MTRR 設定比對結果，並註明對應的測試案例編號或 Log 位置。
+
 ### 7.11.2 Microcode 資料
 
 - 來源與核准版本：`<待填>`
@@ -441,19 +444,21 @@ Microcode 僅應來自 CPU 供應商或核准管道，並保存原始套件版�
 
 ## 7.13 參考資料
 
-1. UEFI Specification
-2. UEFI Platform Initialization Specification
-3. EDK II 文件與相關來源碼
-4. CPU Vendor Processor Programming Reference
-5. CPU Vendor BIOS Writer's Guide
-6. CPU Vendor Microcode Update Guidance
-7. ACPI Specification
-8. SMBIOS Specification
-9. TCG PC Client Platform Firmware Profile
-10. Silicon Initialization Integration Guide
-11. 專案內部 CPU Policy Design
-12. BIOS Release Note 與 Microcode Manifest
-13. CPU Bring-up Test Plan
-14. 專案 Issue、除錯紀錄與驗證報告
+| 參考資料 | 建議對應小節 |
+|---|---|
+| UEFI Specification | 7.1、7.5、7.8 |
+| UEFI Platform Initialization Specification | 7.1、7.5、7.8 |
+| EDK II 文件與相關來源碼 | 7.1、7.3、7.4、7.5 |
+| CPU Vendor Processor Programming Reference | 7.2.2.1、7.3.3、7.4、7.6 |
+| CPU Vendor BIOS Writer's Guide | 7.1、7.2、7.5、7.6 |
+| CPU Vendor Microcode Update Guidance | 7.2、7.7、7.10 |
+| ACPI Specification | 7.5.2、7.6、7.8.2 |
+| SMBIOS Specification | 7.5.2、7.8.2 |
+| TCG PC Client Platform Firmware Profile | 7.6、7.10 |
+| Silicon Initialization Integration Guide | 7.1、7.2、7.3、7.6 |
+| 專案內部 CPU Policy Design | 7.3、7.6、7.11 |
+| BIOS Release Note 與 Microcode Manifest | 7.2.5、7.7、7.10 |
+| CPU Bring-up Test Plan | 7.8、7.9 |
+| 專案 Issue、除錯紀錄與驗證報告 | 7.7、7.8、7.9 |
 
 引用外部規格時，應記錄文件名稱、版本、發布日期及文件編號；引用內部文件時，應記錄路徑、Revision、Owner 與最後確認日期。
