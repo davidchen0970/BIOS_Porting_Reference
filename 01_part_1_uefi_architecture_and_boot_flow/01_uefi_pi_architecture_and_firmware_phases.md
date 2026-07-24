@@ -1,10 +1,8 @@
 # UEFI／PI 架構與韌體執行階段
 
-> 文件狀態：Draft 6
->
 > 文件定位：BIOS／UEFI 平台初始化、除錯與設計審查的入門章節，也是後續 CPU、Memory、DXE Driver、BDS、ACPI、SMM／MM 與 Firmware Update 章節的共同基礎。
 >
-> 適用範圍：以 EDK II 為主要參考實作，涵蓋 x86、AArch64 及其他符合 UEFI／PI 規範的平台。若平台採用 Intel FSP、AMD AGESA、Arm TF-A、Coreboot Payload 或供應商專屬 Silicon Package，實際模組切分與交接點可能不同，但仍可用本章的「階段、輸入、輸出、交接點、觀測點」模型分析。
+> 適用範圍：以 EDK II 為主要參考實作，涵蓋 x86、AArch64、RISC-V 及其他符合 UEFI／PI 規範的平台。若平台採用 Intel FSP、AMD AGESA、Arm TF-A、Coreboot Payload 或供應商專屬 Silicon Package，實際模組切分與交接點可能不同，但仍可用本章的「階段、輸入、輸出、交接點、觀測點」模型分析。
 >
 > 使用方式：先用第 0 節定位階段，再到第 4、9、13 節確認交接條件與排查順序；需要理解資料結構時查第 5、6、7 節；問題發生在 OS 接管前後時查第 8 節。
 
@@ -56,7 +54,7 @@ PI 定義韌體內部完成平台初始化的階段模型與交接介面，包�
 
 **EDK II（EFI Development Kit II）**
 
-EDK II 是 UEFI／PI 的開源參考實作與建置框架，提供 Core、Library Class、Package、BaseTools、模組範本與平台參考工程。EDK II 可用於閱讀、建置與平台移植，但其目錄配置、模組名稱與設計慣例不等同於 UEFI 或 PI 規格要求。
+EDK II 是 UEFI／PI 的開源參考實作與建置框架，提供 Core、Library Class、Package、BaseTools、模組範本與平台參考工程，可用於 x86、AArch64、RISC-V 與其他受支援架構的韌體開發。EDK II 可用於閱讀、建置與平台移植，但其目錄配置、模組名稱與設計慣例不等同於 UEFI 或 PI 規格要求。
 
 分析韌體問題時，應先區分三個層次：PI 描述平台初始化與階段交接；UEFI 描述韌體向 Driver、Application 與 OS Loader 提供的標準介面；EDK II 則提供其中一種參考實作。平台專屬的 Silicon Package、Board Policy 與產品功能仍可能採用不同的模組切分與資料格式。
 
@@ -187,7 +185,7 @@ Next Minimal Test:
 不熟悉上述項目時，仍可先閱讀本章的流程圖，再回到各專題章節補充細節。
 
 
-## 2.1 術語與文件慣例
+### 2.1 術語與文件慣例
 
 | 用語 | 本章中的意義 | 判讀重點 |
 | --- | --- | --- |
@@ -393,7 +391,7 @@ SEC 不宜承擔大型裝置初始化。此階段可用資源最少，錯誤處�
 
 > 數量、位址與耗時門檻應由平台基準檔定義，不以跨平台固定值判定。
 >
-> **平台例外註記**：若量產映像未提供 Serial、POST Port 或外部 Trace，平台仍需指定至少一個可重複取得的替代觀測點，例如 BMC Boot Progress、CPLD Scratch Register、Persistent Status Code 或實驗室專用 Trace Build。例外項目需記錄適用 Build Type、取得方式與證據保存位置。
+> **例外：無 Serial／POST Port 的量產映像**：若量產映像未提供 Serial、POST Port 或外部 Trace，平台仍需指定至少一個可重複取得的替代觀測點，例如 BMC Boot Progress、CPLD Scratch Register、Persistent Status Code 或實驗室專用 Trace Build。例外項目需記錄適用 Build Type、取得方式與證據保存位置。
 
 ### 4.2 PEI：建立永久記憶體並描述平台狀態
 
@@ -446,7 +444,7 @@ PEI 通常不是完整裝置驅動環境。此階段應聚焦於 DXE 所需的�
 
 > HOB 數量與總長度應與同一 Board、SKU、Boot Mode 的核准基準比較。固定要求特定數量，可能誤判合法的平台差異。
 >
-> **平台例外註記**：若 Silicon Package 將 Memory Training、Policy 或部分資源資訊封裝於供應商介面，無法取得完整內部 Log，至少需保存可外部驗證的永久記憶體範圍、HOB 結構檢查結果、Silicon Package 版本與其回傳狀態。例外不得省略 PEI 至 DXE 的必要交接證據。
+> **例外：封裝式 Silicon Package**：若 Silicon Package 將 Memory Training、Policy 或部分資源資訊封裝於供應商介面，無法取得完整內部 Log，至少需保存可外部驗證的永久記憶體範圍、HOB 結構檢查結果、Silicon Package 版本與其回傳狀態。例外不得省略 PEI 至 DXE 的必要交接證據。
 
 ### 4.3 DXE：建立完整 UEFI Driver 與服務環境
 
@@ -488,7 +486,7 @@ DXE 的執行順序不是單純依 FDF 檔案排列。Dispatcher 會根據 Drive
 
 > Driver Binding Handle 數量會隨平台、Option ROM 與功能組合變化。可自動化的判準應是「必要清單全部存在，且沒有非預期增減」，而不是固定要求至少若干 Handle。
 >
-> **平台例外註記**：若特定 SKU 未配置某類 Controller，或由 Option ROM、Silicon Binary、BMC 或其他管理處理器承擔相關功能，必要 Driver／Controller 清單需依 Board、SKU 與 Feature Policy 分版管理。排除項目應具備明確條件，不可只因本次 Dump 未出現就視為合法。
+> **例外：未配置特定 Controller 的 SKU**：若特定 SKU 未配置某類 Controller，或由 Option ROM、Silicon Binary、BMC 或其他管理處理器承擔相關功能，必要 Driver／Controller 清單需依 Board、SKU 與 Feature Policy 分版管理。排除項目應具備明確條件，不可只因本次 Dump 未出現就視為合法。
 
 #### Driver 已載入但裝置未出現的檢查序列
 
@@ -537,7 +535,7 @@ BDS 找到 OS Loader 後，不會立即失去控制權。OS Loader 仍在 Boot S
 
 > 時間與重試次數應記錄於平台測試規格，並依 Cold Boot、Warm Reset、Recovery 等路徑分別設定。
 >
-> **平台例外註記**：Headless Server 不必要求 VGA 或 USB Console Handle。此類平台可依產品設計，以 Serial Console、BMC SOL、Remote Console 或純 Boot Manager Log 作為 Console 證據；若平台刻意不提供互動式 Console，需改驗證錯誤回報、Boot Option 選擇與 Recovery 可觀測性。
+> **例外：Headless Server**：Headless Server 不必要求 VGA 或 USB Console Handle。此類平台可依產品設計，以 Serial Console、BMC SOL、Remote Console 或純 Boot Manager Log 作為 Console 證據；若平台刻意不提供互動式 Console，需改驗證錯誤回報、Boot Option 選擇與 Recovery 可觀測性。
 
 ### 4.5 Runtime：OS 接管後仍保留的韌體服務
 
@@ -578,7 +576,7 @@ Runtime Driver 必須正確處理實體位址轉虛擬位址、記憶體屬性�
 
 > 「OS 在固定秒數內沒有 Exception」可作為產品測試門檻，但不應被視為 UEFI 規格本身的完成定義。時間限制需由平台效能與可靠度規格另行訂定。
 >
-> **平台例外註記**：若目標 OS 不呼叫 `SetVirtualAddressMap()`、不支援 Capsule，或產品政策停用特定 Runtime Service，測試矩陣需明確標記 Not Applicable、替代驗證方式與政策來源，不得以缺少測試結果直接視為通過。
+> **例外：停用或不支援特定 Runtime 路徑**：若目標 OS 不呼叫 `SetVirtualAddressMap()`、不支援 Capsule，或產品政策停用特定 Runtime Service，測試矩陣需明確標記 Not Applicable、替代驗證方式與政策來源，不得以缺少測試結果直接視為通過。
 
 ## 5. PEI Foundation、DXE Foundation 與 Core 元件
 
@@ -988,6 +986,8 @@ flowchart TD
 
 ### 11.2 Serial Log 最小格式
 
+下列格式是本文件建議的專案慣例，不是 UEFI／PI 規格或 EDK II 強制格式。時間欄可使用 TSC、Architectural Timer、平台計時器或自開機起算時間，但同一份 Log 應維持一致的時間基準與單位。
+
 ```text
 [TSC/Time][Phase][Module][Level] Message
 ```
@@ -1039,7 +1039,7 @@ flowchart TD
 - Runtime Memory Attribute 是否正確
 
 
-## 11.4 各階段建議交付物
+### 11.4 各階段建議交付物
 
 | 階段 | 最低交付物 | 審查問題 |
 | --- | --- | --- |
@@ -1177,14 +1177,14 @@ flowchart TD
 
 ### 13.8 常見根因案例索引
 
-案例集中於本節，主章節只保留規則、判準與排查流程。案例中的數值、模組名稱與平台條件應依實際專案替換。
+案例集中於本節，主章節只保留規則、判準與排查流程。案例中的數值、模組名稱與平台條件應依實際專案替換。 Log 關鍵字為常見搜尋方向，不是 UEFI／PI 或 EDK II 規定的固定字串；實際文字仍取決於平台、供應商套件、Debug Mask 與 Build Type。
 
-| 編號 | 分類 | 主要現象 | 對應章節 |
-| --- | --- | --- | --- |
-| C1 | Depex／Protocol Producer | Driver 存在於 FV，但沒有 Entry Log | 7.4、13.4 |
-| C2 | HOB 結構與版本 | Memory Training 完成，DXE 最早期停止 | 6.3、13.3 |
-| C3 | Memory Map／Map Key | `ExitBootServices()` 偶發回傳 `EFI_INVALID_PARAMETER` | 8.1、13.6 |
-| C4 | Runtime Pointer | OS 呼叫 Runtime Service 時例外或重置 | 8.5、13.7 |
+| 編號 | 分類 | 主要現象 | 常見 Log 關鍵字 | 對應章節 |
+| --- | --- | --- | --- | --- |
+| C1 | Depex／Protocol Producer | Driver 存在於 FV，但沒有 Entry Log | `Depex FALSE`、`dependency not satisfied`、`protocol not found` | 7.4、13.4 |
+| C2 | HOB 結構與版本 | Memory Training 完成，DXE 最早期停止 | `invalid HobLength`、`HOB list corrupted`、`GUID HOB not found` | 6.3、13.3 |
+| C3 | Memory Map／Map Key | `ExitBootServices()` 偶發回傳 `EFI_INVALID_PARAMETER` | `ExitBootServices: Invalid Parameter`、`MapKey mismatch` | 8.1、13.6 |
+| C4 | Runtime Pointer | OS 呼叫 Runtime Service 時例外或重置 | `Page Fault`、`SetVariable failed`、`ConvertPointer`、`VirtualAddressChange` | 8.5、13.7 |
 
 #### C1：Depex 依賴的 Protocol 未被生產
 
@@ -1201,7 +1201,12 @@ flowchart TD
 
 **調整方向**：若該 Protocol 為必要依賴，修正 Producer 的平台條件或錯誤處理；若依賴並非必要，重新檢視 Depex 與 Driver 內部能力判斷的責任分配。
 
-**相關判準／流程**：4.3「DXE 可觀測門檻」的 Architectural Protocol 與必要 Driver 項目；7.1「Dependency Expression」；7.4「常見派送問題：快速診斷入口」；13.4「DXE Driver 沒有執行」。
+**相關檢查點**：
+
+1. 4.3 可觀測門檻：Architectural Protocol 與必要 Driver 清單
+2. 7.1 Dependency Expression
+3. 7.4 快速診斷入口
+4. 13.4 完整驗證流程
 
 #### C2：HOB 長度錯誤使 DXE 最早期停止
 
@@ -1218,7 +1223,12 @@ flowchart TD
 
 **調整方向**：為跨模組 GUID HOB 加入版本與長度欄位，建立端使用實際結構大小，消費端拒絕小於最低支援長度的資料。
 
-**相關判準／流程**：4.2「PEI 可觀測門檻」的 HOB List 結構檢查；5.4「DXE IPL 的交接角色」；6.3「HOB」與其常見誤用；13.3「Memory Discovered 後立即 Hang」。
+**相關檢查點**：
+
+1. 4.2 可觀測門檻：HOB List 結構檢查
+2. 5.4 DXE IPL 交接
+3. 6.3 HOB 與常見誤用
+4. 13.3 Memory Discovered 後停止
 
 #### C3：Map Key 在交接前失效
 
@@ -1235,7 +1245,12 @@ flowchart TD
 
 **調整方向**：Loader 應使用最新 Map Key 並保留規格要求的重試路徑；韌體端應避免在最後交接期間產生非必要的 Memory Map 變動。
 
-**相關判準／流程**：4.5「OS Hand-off 與 Runtime 可觀測門檻」的 `ExitBootServices()` 與 Exit Callback 項目；8.1「OS Loader 呼叫流程」；8.4「ExitBootServices Event 的使用原則」；13.6「`ExitBootServices()` 失敗」。
+**相關檢查點**：
+
+1. 4.5 可觀測門檻：`ExitBootServices()` 與 Exit Callback
+2. 8.1 OS Loader 呼叫流程
+3. 8.4 ExitBootServices Event
+4. 13.6 `ExitBootServices()` 失敗
 
 #### C4：Runtime Pointer 未完成轉換
 
@@ -1252,7 +1267,11 @@ flowchart TD
 
 **調整方向**：建立 Runtime Pointer 清單，逐項定義是否需 `ConvertPointer()`；避免 Runtime Context 引用 Boot Services Code／Data 或缺少 Runtime Attribute 的 MMIO Region。
 
-**相關判準／流程**：4.5「OS Hand-off 與 Runtime 可觀測門檻」的 Runtime Memory、Virtual Address 與 Runtime Service 項目；8.5「Runtime Memory 與虛擬位址轉換」；13.7「OS 進入後 Runtime Service 異常」。
+**相關檢查點**：
+
+1. 4.5 可觀測門檻：Runtime Memory、Virtual Address 與 Runtime Service
+2. 8.5 Runtime Memory 與虛擬位址轉換
+3. 13.7 OS 進入後 Runtime Service 異常
 
 ## 14. 安全性與相容性注意事項
 
@@ -1309,7 +1328,7 @@ UEFI／PI 開機流程可以濃縮成五個連續問題：
 遇到問題時，先判斷最後成功的階段與交接點，再檢查該處的必要條件、資料結構與服務可用性，通常比直接追查單一 Driver 更有效率。
 
 
-## 15.1 讀完本章後，你應該能回答的問題
+### 15.1 讀完本章後，你應該能回答的問題
 
 - [ ] 我能說明 UEFI、PI 與 EDK II 的差異。
 - [ ] 我能說出 SEC、PEI、DXE、BDS、Runtime 各自的主要責任。
@@ -1327,7 +1346,7 @@ UEFI／PI 開機流程可以濃縮成五個連續問題：
 如果有三項以上無法回答，建議回到第 0、4、6、8、9 節重新閱讀，並搭配實際平台 Serial Log 標示每個階段的起訖點。
 
 
-## 15.2 本章重點濃縮
+### 15.2 本章重點濃縮
 
 - 先辨識階段，再選擇工具與排查方向。
 - PI 描述平台初始化責任，UEFI 描述標準介面，EDK II 是參考實作。
@@ -1354,11 +1373,11 @@ UEFI／PI 開機流程可以濃縮成五個連續問題：
 
 > 參考規格版本應在專案開始時固定，並在文件首頁或平台版本矩陣中記錄。若規格、edk2 或 Silicon Package 升版，應重新執行階段交接、Memory Map、Driver Dispatch、ExitBootServices 與 Runtime Service 回歸測試。
 
-## 附錄 A：本版修訂重點
+## 附錄 A：定稿修訂摘要
 
-- 在 13.8 的 C1 至 C4 增加「相關判準／流程」，建立案例至主文的反向追溯路徑。
-- 確認案例索引語句位於對應小節末尾，避免中斷通則說明。
-- 在 SEC、PEI、DXE、BDS、OS Hand-off／Runtime 的可觀測門檻後增加平台例外註記。
-- 對 Headless Server、無 Serial Build、封裝式 Silicon Package、未配置 Controller 與特定 Runtime Policy 定義例外記錄方式。
-- 補強既有 Silicon Package／FSP 必須修正 HOB 時的審查資料、相容層集中原則與移轉追蹤要求。
-- 維持工程文件語氣，不使用口訣化、擬人化或過度簡化的教學措辭。
+- 將 13.8 案例反向連結精簡為編號式「相關檢查點」。
+- 在案例索引增加常見 Log 關鍵字，並註明關鍵字不屬於規格固定字串。
+- 將各階段例外標題統一為具名情境，方便依平台條件掃描。
+- 在 0.1 與文件適用範圍明確納入 RISC-V，與 15.1 的責任模型敘述一致。
+- 補充 Serial Log 格式的時間基準與文件定位，避免將專案慣例誤認為 EDK II 固定格式。
+- 移除文件試行狀態，作為定稿版本。
