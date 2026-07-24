@@ -46,7 +46,7 @@
 UEFI PI 將平台初始化拆成多個執行階段，使處理器初始化、記憶體建立、驅動程式派送、開機政策與 OS 交接具有明確責任邊界。簡化後的流程如下：
 
 ```mermaid
-flowchart LR
+flowchart TD
     A[Reset Vector] --> B[SEC]
     B --> C[PEI]
     C --> D[DXE IPL]
