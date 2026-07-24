@@ -1,8 +1,35 @@
-# UEFI PI 架構與韌體執行階段
+# UEFI／PI 架構與韌體執行階段
 
-> 狀態：Draft
+> 文件狀態：Draft 2
 >
-> 適用範圍：以 EDK II 為主要參考實作，涵蓋 x86、AArch64 及其他符合 UEFI／PI 規範的平台。若平台採用 Intel FSP、AMD AGESA、Arm TF-A、Coreboot Payload 或供應商專屬 Silicon Package，實際模組切分與交接點可能不同，但本章描述的責任邊界仍可作為分析基準。
+> 文件定位：BIOS／UEFI 平台初始化、除錯與設計審查的入門章節，也是後續 CPU、Memory、DXE Driver、BDS、ACPI、SMM／MM 與 Firmware Update 章節的共同基礎。
+>
+> 適用範圍：以 EDK II 為主要參考實作，涵蓋 x86、AArch64 及其他符合 UEFI／PI 規範的平台。若平台採用 Intel FSP、AMD AGESA、Arm TF-A、Coreboot Payload 或供應商專屬 Silicon Package，實際模組切分與交接點可能不同，但仍可用本章的「階段、輸入、輸出、交接點、觀測點」模型分析。
+>
+> 使用方式：先用第 0 節定位階段，再到第 4、9、13 節確認交接條件與排查順序；需要理解資料結構時查第 5、6、7 節；問題發生在 OS 接管前後時查第 8 節。
+
+## 快速導覽
+
+- [5 分鐘掌握開機主線](#0-5-分鐘入門uefi-開機流程速覽)：先理解 SEC、PEI、DXE、BDS、Runtime。
+- [確認規格與實作邊界](#3-uefi-與-pi-規格的定位及邊界)：區分 UEFI、PI、EDK II 與平台程式。
+- [依階段閱讀生命週期](#4-secpei-dxebds-與-runtime-的生命週期)：查看各階段責任、輸入、輸出與完成條件。
+- [追查介面與資料生命週期](#6-ppiprotocolhobevent-與-handle-database)：判斷資料由誰建立、何時有效、由誰消費。
+- [分析 Driver 未執行或裝置未出現](#7-architectural-protocol-與-driver-dispatch-相依關係)：區分 Dispatch、Connect 與 Driver Binding。
+- [分析 OS Hand-off 與 Runtime](#8-exitbootservices-前後可用服務差異)：確認 Memory Map、服務終止與位址轉換。
+- [建立 Log 與測試基準](#11-建議觀測點與-debug-資料)：統一版本、平台、階段與錯誤資訊。
+- [從現象開始排查](#13-常見問題與排查方向)：依「現象 → 階段 → 交接點 → 證據」縮小範圍。
+
+### 任務導向入口
+
+| 目前任務 | 建議先讀 | 第一個要取得的證據 |
+| --- | --- | --- |
+| 新平台第一次開機 | 0、4、9、11 | 最早 POST Code、Serial Byte、SPI Flash 活動 |
+| Memory Training 後停住 | 4.2、5.4、6.1、6.3、13.3 | Memory Discovered、Memory Migration、HOB Dump |
+| DXE Driver 沒有執行 | 4.3、7.1、7.4、13.4 | FV 內容、Depex、映像驗證、Protocol 生產者 |
+| Driver 有 Entry Log，但裝置不存在 | 6.5、6.6、7.3、13.5 | Controller Handle、Supported／Start、Child Handle |
+| 找到磁碟但無法啟動 | 4.4、9.1、13.1 | Partition、File System、Device Path、Boot Variable |
+| `ExitBootServices()` 失敗 | 8.1、8.4、13.6 | 每次 Memory Map、Map Key、Exit Event 行為 |
+| OS 進入後 Variable／Reset 異常 | 4.5、8.5、13.7 | Runtime Memory Attribute、Pointer 轉換、SMM／MM Log |
 
 ## 0. 5 分鐘入門：UEFI 開機流程速覽
 
@@ -54,6 +81,29 @@ flowchart TD
 - OS 接管後才出錯，優先看 ACPI、Runtime Memory、SMM／MM 與 OS Driver 交接。
 
 如果還不能說出「最後成功的是哪個階段」，第一輪工作不是修改 Driver，而是補齊能辨識階段的 Serial Log、POST Code 或硬體觀測點。
+
+### 0.4.1 統一排查方法
+
+本章後續排查表均使用同一個順序：
+
+1. **現象**：記錄停滯、重置、錯誤碼、耗時或裝置缺失，不先推定原因。
+2. **最後成功點**：找出最後一筆可信的 Log、POST Code、Protocol、PPI 或硬體訊號。
+3. **下一個交接點**：列出進入下一階段所需的記憶體、映像、資料結構與服務。
+4. **證據比對**：比對 Known-good Log、Build Report、HOB、Handle／Protocol、Memory Map 與硬體量測。
+5. **最小變更驗證**：一次只改一個條件，保留版本、設定、測試路徑與結果。
+6. **回歸範圍**：除目標路徑外，同時驗證 Cold Boot、Warm Reset、Update、Recovery 與 Runtime。
+
+```text
+Platform/Board/SKU:
+Firmware Build ID / Commit:
+Boot Mode / Reset Cause:
+Last Known-good Phase and Checkpoint:
+Expected Next Checkpoint:
+Observed Evidence:
+Compared Baseline:
+Current Hypotheses:
+Next Minimal Test:
+```
 
 ### 0.5 新手閱讀路線
 
@@ -120,6 +170,21 @@ flowchart TD
 
 不熟悉上述項目時，仍可先閱讀本章的流程圖，再回到各專題章節補充細節。
 
+
+## 2.1 術語與文件慣例
+
+| 用語 | 本章中的意義 | 判讀重點 |
+| --- | --- | --- |
+| Must／規格要求 | 對應規格要求的外部行為 | 確認規格版本與原文條件 |
+| EDK II 參考實作 | EDK II Core、Library 或常見 Package 的設計 | 不代表所有平台必須採同一模組名稱或路徑 |
+| 平台政策 | Board、SKU、產品或供應商自行決定的行為 | 標示設定來源、適用範圍與預設值 |
+| PPI | PEI 階段的介面或里程碑 | 檢查 GUID、安裝者、消費者與記憶體生命週期 |
+| Protocol | DXE／UEFI 階段安裝在 Handle 上的介面 | 檢查所在 Handle、Open 關係與可用階段 |
+| HOB | PEI 傳給 DXE 的單向交接資料 | 檢查建立者、型別、長度、內容與消費者 |
+| Dispatch | Dispatcher 載入映像並執行 Entry Point | 不等同 Controller 已完成初始化 |
+| Connect | Driver Binding 綁定 Controller 並執行 `Supported()`／`Start()` | 檢查 Child Handle 與 I/O Protocol 是否建立 |
+
+文件中的「常見」表示常見實作或現象，不代表規格保證；「優先檢查」表示建議排查順序，不表示已確認成因。
 
 ## 3. UEFI 與 PI 規格的定位及邊界
 
@@ -841,6 +906,17 @@ flowchart TD
 - Runtime Memory Attribute 是否正確
 
 
+## 11.4 各階段建議交付物
+
+| 階段 | 最低交付物 | 審查問題 |
+| --- | --- | --- |
+| SEC | Reset Vector 說明、Flash Mapping、Temporary RAM 範圍、最早觀測點 | 無 DRAM 時是否仍能辨識執行進度與失敗類型？ |
+| PEI | Boot Mode、Memory Training 結果、Memory Map 摘要、HOB Dump | Temporary RAM 中的資料與指標是否都完成遷移？ |
+| DXE | FV／FFS 清單、Depex、Architectural Protocol、Handle／Protocol 摘要 | Driver 是未 Dispatch，還是未 Connect？ |
+| BDS | Console、Boot Variable、Device Path、Boot Policy 與 Recovery 規則 | 每個 Boot Option 的來源、優先權與失敗後路徑是否明確？ |
+| Runtime | Runtime Memory Map、Virtual Address Change 處理、SMM／MM 邊界 | OS 接管後仍存活的程式、資料與指標是否完整標示？ |
+| 全流程 | Build ID、Commit、工具鏈版本、Known-good Log、測試矩陣 | 其他人能否用相同輸入重現映像與測試結果？ |
+
 ## 12. 驗證與測試重點
 
 ### 12.1 基本測試矩陣
@@ -1014,7 +1090,7 @@ UEFI／PI 開機流程可以濃縮成五個連續問題：
 
 ## 15.1 讀完本章後，你應該能回答的問題
 
-- [ ] 我能用說明 UEFI、PI 與 EDK II 的差異。
+- [ ] 我能說明 UEFI、PI 與 EDK II 的差異。
 - [ ] 我能說出 SEC、PEI、DXE、BDS、Runtime 各自的主要責任。
 - [ ] 我能指出 Temporary RAM、Permanent Memory 與 Memory Migration 發生在哪裡。
 - [ ] 我能區分 PPI、Protocol、HOB、Event 與 Handle 的用途。
@@ -1053,6 +1129,17 @@ UEFI／PI 開機流程可以濃縮成五個連續問題：
 - 常用硬體工具：JTAG、ITP／XDP、Trace Probe、Logic Analyzer、Oscilloscope；本章只界定用途，接線、權限與命令由平台 Debug 文件說明
 - 專案資源：Schematic、Board Design Guide、Silicon Errata、版號矩陣、POST Code 表、Known-good Log 與 Issue Tracker
 
-> 供應商文件通常受版本、平台與授權限制。專案文件應記錄實際文件名稱、Revision、发布日期與適用 Silicon Stepping，不應只寫「參考 Vendor 文件」。
+> 供應商文件通常受版本、平台與授權限制。專案文件應記錄實際文件名稱、Revision、發布日期與適用 Silicon Stepping，不應只寫「參考 Vendor 文件」。
 
 > 參考規格版本應在專案開始時固定，並在文件首頁或平台版本矩陣中記錄。若規格、edk2 或 Silicon Package 升版，應重新執行階段交接、Memory Map、Driver Dispatch、ExitBootServices 與 Runtime Service 回歸測試。
+
+## 附錄 A：本次改寫重點
+
+本版參考 BMC Build System／BSP 章節的任務導向寫法，保留原章技術內容，並補強：
+
+- 快速導覽與任務導向入口。
+- 「階段、輸入、輸出、交接點、觀測點」的一致描述模型。
+- 固定排查方法與問題摘要格式。
+- 規格要求、EDK II 參考實作、平台政策與常見現象的術語邊界。
+- 各階段最低交付物與審查問題。
+- 原有流程圖、排查表、測試矩陣、安全性與相容性內容的可查閱性。

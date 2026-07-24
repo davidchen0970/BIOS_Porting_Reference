@@ -1,54 +1,767 @@
-# SEC、PEI、DXE 與 BDS 開機流程
+# 2. SEC、PEI、DXE 與 BDS 開機流程
 
-> 狀態：Draft
-> 文件用途：本檔為章節撰寫大綱，內容、規格版本與平台資料仍需由章節負責人補充及驗證。
+## 適用範圍
 
-## 1. 文件目的
-- 說明「SEC、PEI、DXE 與 BDS 開機流程」在 UEFI 架構與開機流程 中的角色。
-- 定義本章涵蓋範圍、非涵蓋範圍與預期讀者。
-- 提供設計、移植、驗證及問題排查時可重複使用的參考架構。
+本章說明採用 UEFI Platform Initialization（PI）架構之平台，從處理器離開 Reset 狀態、進入 SEC，經過 PEI、DXE 與 BDS，直到控制權交給 OS Loader 的主要流程。內容著重各階段的責任、輸入與輸出、模組派送機制、階段交接介面，以及早期開機問題的觀測與排查方式。
 
-## 2. 建議先備知識
-- 建立從 Reset Vector 到 OS Loader 的整體視角
-- 說明各執行階段的責任、輸入、輸出與交接介面
-- 整理可用於定位早期開機問題的觀測點
+本章涵蓋：
 
-## 3. 建議內容大綱
-### 3.1 Reset Vector 與 SEC Entry
-### 3.2 Temporary RAM、CAR 與 Stack 建立
-### 3.3 PEI Core、PEIM Dispatch 與 Memory Discovered
-### 3.4 DXE IPL、DXE Core 與 Driver Dispatch
-### 3.5 BDS Policy、Boot Option 與 Boot Manager
-### 3.6 ReadyToBoot、ExitBootServices 與 Runtime
-### 3.7 各階段停機點、POST Code 與 Serial Log
+- Reset Vector、SEC Entry 與最初始執行環境。
+- Temporary RAM、Cache-as-RAM（CAR）與初始 Stack。
+- PEI Core、PEIM、PPI、HOB 與永久記憶體建立。
+- DXE IPL、DXE Core、DXE Driver、Protocol 與事件機制。
+- BDS、Boot Option、Boot Manager 與 OS Loader 交接。
+- ReadyToBoot、ExitBootServices 與 Runtime Services。
+- POST Code、Serial Log、Checkpoint 與各階段停機問題。
 
-## 4. 建議圖表與資料
-- 架構圖或模組關係圖
-- 初始化時序圖、狀態圖或資料流圖
-- 關鍵設定、PCD、Variable、Register 或 Table 欄位表
-- 正常與異常 Log 對照
-- 平台差異或版本差異比較
+本章不深入描述特定處理器的微架構、記憶體控制器訓練演算法、Secure Boot 金鑰佈署細節、ACPI AML 編寫方式，或特定 BIOS 供應商介面的內部設計。這些內容應由對應平台章節或安全性章節補充。
 
-## 5. 驗證與測試重點
-- 定義測試環境、韌體版本、硬體版本及必要工具。
-- 列出正常流程、邊界條件、錯誤注入及復原測試。
-- 記錄可判定 Pass／Fail 的 Log、狀態、暫存器或輸出。
-- 說明 Cold Boot、Warm Reset、AC Cycle、更新前後及不同 SKU 是否需要覆蓋。
+> 注意：不同 CPU、PCH、SoC、IBV、EDK II 分支與專案可能調整模組名稱、派送順序、POST Code 與 Log 格式。本文描述通用 PI/UEFI 架構，實際行為應以專案來源碼、平台設定與使用中的規格版本為準。
 
-## 6. 常見問題與排查方向
-- 症狀與發生階段
-- 首要觀測點與資料收集方式
-- 可能原因與驗證順序
-- 暫時規避方式、正式修正方向與回歸範圍
+## 適用讀者
 
-## 7. 安全性與相容性注意事項
-- 權限、信任邊界、敏感資料與金鑰處理。
-- 規格版本、工具鏈、OS、Silicon Stepping 及既有產品相容性。
-- 更新、降版、斷電及失敗復原時的資料完整性。
+- BIOS、UEFI、EDK II、BSP 與平台韌體開發人員。
+- 執行新平台移植、Silicon Bring-up、記憶體初始化、PCIe 裝置整合或開機流程除錯的人員。
+- 分析開機停機、重置迴圈、無畫面、無 Serial Log、Boot Option 異常或 OS Loader 交接失敗的人員。
+- 需要理解 BIOS 與 BMC、CPLD、ME／PSP、TPM、Option ROM、OS Loader 之間交互關係的人員。
 
-## 8. 參考資料
-- [ ] UEFI Specification
-- [ ] UEFI Platform Initialization Specification
-- [ ] EDK II 文件與來源碼位置
-- [ ] TCG、ACPI、SMBIOS、PCI-SIG 或平台供應商規格（依本章適用性補充）
-- [ ] 專案內部設計文件、Issue 與測試報告
+## 快速導覽
+
+- [建立整體視角](#21-uefi-pi-開機架構概觀)：從 Reset Vector 到 OS Loader 的主流程。
+- [理解 SEC](#22-reset-vector-sec-與-temporary-ram)：最初始執行環境、Temporary RAM 與 SEC 到 PEI 的交接。
+- [理解 PEI](#23-pei-core-peim-與永久記憶體建立)：PEIM 派送、PPI、Memory Init 與 HOB。
+- [理解 DXE](#24-dxe-ipl-dxe-core-與-driver-dispatch)：DXE Core、Protocol、Driver Dispatch 與系統資源建立。
+- [理解 BDS](#25-bds-boot-manager-與-os-loader)：Boot Policy、Boot Option 與載入 OS。
+- [理解 UEFI 與 OS 的邊界](#26-readytoboot-exitbootservices-與-runtime)：Boot Services 結束及 Runtime Services 保留方式。
+- [排查停機問題](#27-觀測點-post-code-與-serial-log)：依階段收集證據並縮小問題範圍。
+- [執行驗證](#28-驗證與測試策略)：Cold Boot、Warm Reset、AC Cycle 與錯誤注入。
+- [查閱常見問題](#29-常見問題與排查流程)：依症狀建立排查順序。
+
+---
+
+## 2.1 UEFI PI 開機架構概觀
+
+UEFI PI 將平台初始化拆成多個執行階段，使處理器初始化、記憶體建立、驅動程式派送、開機政策與 OS 交接具有明確責任邊界。簡化後的流程如下：
+
+```mermaid
+flowchart LR
+    A[Reset Vector] --> B[SEC]
+    B --> C[PEI]
+    C --> D[DXE IPL]
+    D --> E[DXE]
+    E --> F[BDS]
+    F --> G[UEFI Boot Manager]
+    G --> H[OS Loader]
+    H --> I[ExitBootServices]
+    I --> J[OS Runtime]
+```
+
+### 2.1.1 各階段責任
+
+| 階段 | 主要責任 | 典型輸入 | 典型輸出或交接資料 |
+|---|---|---|---|
+| Reset Vector | 建立最初始處理器執行路徑 | 硬體 Reset 狀態、Boot Strap | SEC Entry 所需的最低執行狀態 |
+| SEC | 建立可信且可執行的早期環境 | Reset 狀態、Firmware Volume | Temporary RAM、初始 Stack、SEC 到 PEI 的交接資訊 |
+| PEI | 完成早期平台與記憶體初始化 | SEC 交接資訊、PEIM、PPI | Permanent Memory、HOB List、可供 DXE 使用的平台資訊 |
+| DXE IPL | 定位並載入 DXE Core | HOB List、Firmware Volume | DXE Core Entry 與必要參數 |
+| DXE | 建立完整 UEFI Driver 執行環境 | HOB、DXE Drivers、Protocol | 系統資源、裝置、Console、Boot Services、Runtime Services |
+| BDS | 套用平台開機政策並選擇開機目標 | UEFI Variables、Boot Options、裝置路徑 | 被選定的 UEFI Application 或 OS Loader |
+| OS Loader | 載入 OS 所需映像與資料 | UEFI Protocol、Boot Services、系統表 | 呼叫 ExitBootServices 後將控制權交給 OS |
+| Runtime | 提供 OS 執行期間仍可使用的 UEFI 服務 | Runtime Services、Runtime Memory Map | Variable、Time、ResetSystem 等平台服務 |
+
+### 2.1.2 開機資訊如何跨階段傳遞
+
+跨階段資訊不是以單一全域資料結構傳遞，而是依階段使用不同機制：
+
+- SEC 到 PEI：透過 SEC Platform Information 與 PEI Core Entry 參數交接。
+- PEI 內部：透過 PPI 提供服務，透過 HOB 記錄要交給後續階段的資訊。
+- PEI 到 DXE：DXE IPL 依 HOB List 與 Firmware Volume 資訊載入 DXE Core。
+- DXE 內部：透過 Protocol、Handle Database、Event 與 UEFI System Table 協作。
+- DXE/BDS 到 OS Loader：透過 UEFI Boot Services、Runtime Services、Configuration Table、Device Path 與 Variable 交接。
+
+### 2.1.3 建立開機問題的階段觀念
+
+排查時先判斷「最後一個確定完成的階段」，再確認下一階段所需的輸入是否成立。例如：
+
+1. 完全沒有 POST Code 或 Serial Output，先查 Reset Vector、映像映射、CPU Reset 狀態與最初始硬體條件。
+2. 有 SEC Log，但沒有 PEI Core Log，優先檢查 Temporary RAM、PEI Core 定位與 Firmware Volume。
+3. PEI 可執行但 Memory Discovered 未出現，優先檢查 Memory Init、Silicon Policy、SPD、供電與時序條件。
+4. DXE 已開始但裝置不存在，檢查 HOB、Protocol 安裝、Driver Binding、PCI Enumeration 與裝置資源。
+5. BDS 已執行但無法啟動 OS，檢查 Boot Option、Device Path、檔案系統、Secure Boot 驗證與 OS Loader。
+
+---
+
+## 2.2 Reset Vector、SEC 與 Temporary RAM
+
+### 2.2.1 Reset Vector 與 SEC Entry
+
+處理器離開 Reset 後，會從架構定義或平台重映射後的 Reset Vector 開始取指。此時可使用的硬體資源非常有限，DRAM 通常尚未初始化，PCI 裝置、Console 與完整韌體服務也尚未可用。
+
+Reset Vector 到 SEC Entry 的常見工作包含：
+
+- 建立最低限度的處理器模式與控制暫存器狀態。
+- 處理 Reset 類型或 Boot Mode 的最初始判斷。
+- 定位 SEC 程式與早期 Firmware Volume。
+- 建立 Temporary RAM 或準備進入建立 Temporary RAM 的流程。
+- 將控制權交給 SEC Core 或平台 SEC 模組。
+
+### 2.2.2 SEC 階段的主要責任
+
+SEC 是 PI 架構的第一個正式階段，主要責任包括：
+
+- 建立可執行 C 程式的最低環境。
+- 建立 Temporary RAM 與初始 Stack。
+- 在需要時進行早期信任驗證或量測。
+- 尋找 PEI Foundation／PEI Core。
+- 整理 SEC 到 PEI 的交接資訊並呼叫 PEI Core Entry。
+
+SEC 不應假設永久記憶體已可使用，也不應在此階段引入大量複雜服務。此階段的設計重點是小、穩定、可觀測，並能在硬體資源有限時完成後續階段所需的最低準備。
+
+### 2.2.3 Temporary RAM、CAR 與 Stack
+
+在 DRAM 可用前，平台需要一塊暫時儲存區保存 Stack、早期資料與部分 PEI 資料。常見方式包含：
+
+| 方式 | 說明 | 主要注意事項 |
+|---|---|---|
+| Cache-as-RAM | 將 CPU Cache 的一部分當作暫時記憶體 | Cache 設定、MTRR／架構限制、大小與對齊 |
+| SRAM | 使用 SoC 內建 SRAM | 容量通常有限，需確認生命週期與存取屬性 |
+| 特定晶片暫存區 | 使用平台提供的早期記憶體區域 | 平台相依性高，需確認與其他元件的共用方式 |
+
+Temporary RAM 必須至少容納：
+
+- 初始 Stack。
+- SEC／PEI 早期資料。
+- PEI Core 執行所需的暫存空間。
+- 在永久記憶體建立前產生的必要 HOB 或服務資料。
+
+### 2.2.4 Temporary RAM Migration
+
+當 PEI 完成 DRAM 初始化後，原先位於 Temporary RAM 的 Stack 與必要資料需搬移到永久記憶體。遷移流程通常包含：
+
+1. Memory Init PEIM 建立可用 DRAM。
+2. 安裝 Memory Discovered PPI。
+3. PEI Core 配置永久記憶體。
+4. 搬移 Stack、Heap 與需要保留的早期資料。
+5. 更新內部指標與執行內容。
+6. 在平台允許時停用或回收 CAR／Temporary RAM。
+
+遷移問題可能造成隨機重置、返回位址錯誤、區域變數損壞、遷移後立即停機，或只在特定編譯最佳化與記憶體配置下出現。
+
+### 2.2.5 SEC 階段主要檢查點
+
+- Reset Vector 是否映射到正確 Firmware Region。
+- SEC Entry 是否執行。
+- Temporary RAM 初始化是否成功。
+- Stack Base、Stack Size 與對齊是否合理。
+- PEI Core 所在 Firmware File／Section 是否可被定位。
+- SEC 到 PEI 的交接結構是否有效。
+- 早期驗證或量測失敗時是否有可辨識的錯誤路徑。
+
+---
+
+## 2.3 PEI Core、PEIM 與永久記憶體建立
+
+### 2.3.1 PEI 的目的
+
+PEI（Pre-EFI Initialization）負責在有限環境中初始化足以進入 DXE 的平台狀態。最重要的里程碑是建立永久記憶體，並產出可被 DXE 使用的 HOB List。
+
+PEI 的典型工作包含：
+
+- 判斷 Boot Mode。
+- 初始化必要的 Silicon、Clock、Power、GPIO 與平台裝置。
+- 執行記憶體偵測、訓練與初始化。
+- 建立 HOB，描述記憶體、Firmware Volume、CPU、資源與平台資料。
+- 定位 DXE Firmware Volume 並由 DXE IPL 載入 DXE Core。
+
+### 2.3.2 PEI Core 與 PEIM Dispatch
+
+PEI Core 負責管理 PEI Services、PPI Database 與 PEIM Dispatcher。PEIM 通常透過下列條件被派送：
+
+- PEIM 位於可被 PEI Core 掃描的 Firmware Volume。
+- PEIM 的 Depex 已滿足。
+- 所需 PPI 已安裝。
+- 平台 Boot Mode 或其他條件允許該模組執行。
+
+簡化流程：
+
+```mermaid
+flowchart TD
+    A[PEI Core Entry] --> B[建立 PEI Services 與 PPI Database]
+    B --> C[掃描可用 Firmware Volume]
+    C --> D[評估 PEIM Depex]
+    D --> E[派送可執行 PEIM]
+    E --> F{有新 PPI 或 FV?}
+    F -- 是 --> C
+    F -- 否 --> G{Memory Discovered?}
+    G -- 否 --> D
+    G -- 是 --> H[Temporary RAM Migration]
+    H --> I[DXE IPL]
+```
+
+### 2.3.3 PPI 的角色
+
+PPI（PEIM-to-PEIM Interface）是 PEI 階段模組間的服務介面。常見動作包括：
+
+- InstallPpi：安裝新的 PPI。
+- LocatePpi：尋找已安裝的 PPI。
+- ReInstallPpi：以新介面替換既有 PPI。
+- NotifyPpi：在特定 PPI 安裝時通知其他 PEIM。
+
+PPI 問題常見於 GUID 不一致、介面生命週期錯誤、Notify 時機不符、Depex 未滿足，或模組存在但所在 Firmware Volume 尚未被發現。
+
+### 2.3.4 Boot Mode
+
+Boot Mode 會影響 PEIM 執行路徑與後續初始化政策。常見模式包括：
+
+- Full Configuration。
+- Minimal Configuration。
+- No Configuration Changes。
+- S3 Resume。
+- Flash Update。
+- Recovery。
+
+實際支援項目依平台而定。排查時需確認 Boot Mode 的判定來源、設定時機，以及後續 PEIM 是否使用相同認知。
+
+### 2.3.5 Memory Init 與 Memory Discovered
+
+Memory Init 是 PEI 的關鍵路徑，可能包含：
+
+- 讀取 SPD 或平台記憶體拓撲設定。
+- 套用 CPU／SoC／記憶體控制器 Policy。
+- 執行 DRAM Training。
+- 建立可用記憶體區域。
+- 保留韌體、SMRAM、TSEG、ME／PSP、UMA 或其他平台區域。
+- 安裝 Memory Discovered PPI。
+
+Memory Discovered 是重要分界點。其前後常呈現不同的 Stack、記憶體配置與可用服務，因此 Log 應明確標記：
+
+- Memory Init 開始與結束。
+- 所選記憶體 Policy／Profile。
+- 記憶體容量、通道、DIMM 與速度。
+- Training 失敗項目與重試狀態。
+- Permanent Memory Base／Size。
+- Temporary RAM Migration 完成狀態。
+
+### 2.3.6 HOB 的角色
+
+HOB（Hand-Off Block）用來把 PEI 所取得或建立的資訊交給 DXE。常見類別包括：
+
+| HOB 類型 | 用途 |
+|---|---|
+| PHIT HOB | 描述 HOB List 與初始記憶體配置 |
+| Resource Descriptor HOB | 描述系統記憶體、MMIO、I/O 等資源 |
+| Memory Allocation HOB | 描述已配置或保留的記憶體 |
+| Firmware Volume HOB | 指出後續可掃描的 Firmware Volume |
+| CPU HOB | 描述實體位址寬度與 I/O 位址寬度等資訊 |
+| GUID HOB | 傳遞平台或元件自訂資料 |
+
+GUID HOB 適合傳遞跨階段必要資料，但應管理版本、長度、欄位對齊與資料有效性，避免 DXE Driver 對 PEI 內部結構形成不透明相依。
+
+### 2.3.7 PEI 階段主要檢查點
+
+- PEI Core 是否進入並開始派送。
+- 目標 PEIM 是否位於已發現的 Firmware Volume。
+- PEIM Depex 與 PPI 相依是否滿足。
+- Boot Mode 是否符合本次啟動情境。
+- Memory Init 是否開始、完成或停在特定 Training Step。
+- Memory Discovered PPI 是否安裝。
+- Temporary RAM Migration 是否完成。
+- HOB List 是否包含 DXE 所需的資源與平台資訊。
+- DXE IPL 是否被派送。
+
+---
+
+## 2.4 DXE IPL、DXE Core 與 Driver Dispatch
+
+### 2.4.1 DXE IPL
+
+DXE IPL（DXE Initial Program Load）位於 PEI 與 DXE 之間，負責：
+
+- 找到包含 DXE Core 的 Firmware Volume。
+- 載入或解壓縮 DXE Core 映像。
+- 準備 HOB List 與 DXE Core Entry 參數。
+- 將控制權交給 DXE Core。
+
+若 PEI 已完成但 DXE Core 未執行，優先檢查 DXE Firmware Volume HOB、DXE Core FFS／Section、映像驗證、解壓縮介面與載入位址。
+
+### 2.4.2 DXE Core 的主要責任
+
+DXE Core 建立完整 UEFI 驅動環境，主要負責：
+
+- 建立 Boot Services 與 Runtime Services 基礎。
+- 建立 Handle Database、Protocol Database 與 Event 機制。
+- 解析 HOB List 並建立系統資源認知。
+- 掃描 Firmware Volume 並派送 DXE Drivers。
+- 建立 UEFI System Table、Boot Services Table 與 Runtime Services Table。
+- 在條件滿足後轉入 BDS。
+
+### 2.4.3 DXE Driver Dispatch 與 Depex
+
+DXE Dispatcher 會掃描 Firmware Volume 中的 Driver，評估依賴條件，並派送可執行模組。派送成功不代表 Driver 一定已管理裝置，兩者需分開判讀：
+
+1. Driver Image 被載入。
+2. Driver Entry Point 執行。
+3. Driver 安裝 Protocol 或 Driver Binding Protocol。
+4. ConnectController 將 Driver 與 Controller 配對。
+5. Driver Binding Supported／Start 成功。
+6. 裝置產生新的 Handle、Protocol 或 Child Handle。
+
+### 2.4.4 Protocol 與 Handle Database
+
+DXE 與 UEFI Driver 透過 Protocol 交換服務。典型流程如下：
+
+- Driver 在 Handle 上安裝 Protocol。
+- 其他 Driver 以 GUID 尋找 Protocol。
+- Event 或 Protocol Notify 用於監聽新介面出現。
+- Driver Binding 將驅動程式與 Controller Handle 配對。
+
+排查裝置未出現時，可依序確認：
+
+- Bus Driver 是否已建立 Controller Handle。
+- 需要的 Protocol 是否已安裝。
+- Driver Binding Supported 是否接受該 Controller。
+- Start 是否因資源、Policy 或硬體回應失敗。
+- Child Handle 是否建立。
+- Device Path 是否完整且穩定。
+
+### 2.4.5 系統資源與記憶體地圖
+
+DXE 需整合 PEI 提供的資源資訊，並建立 UEFI Memory Map。常見資源包括：
+
+- System Memory。
+- Reserved Memory。
+- MMIO 與 PCI Aperture。
+- I/O Port Space。
+- ACPI Reclaim／NVS Memory。
+- Runtime Code／Data。
+- Firmware Device 與特殊保留區。
+
+資源描述錯誤可能導致 PCI BAR 配置失敗、OS 記憶體地圖異常、Runtime Service 失效、ACPI Table 位址衝突，或只在大容量記憶體／特定插卡配置下發生問題。
+
+### 2.4.6 PCI Enumeration 與裝置初始化
+
+DXE 常見裝置流程包含：
+
+1. Root Bridge 建立。
+2. 掃描 PCI Bus／Device／Function。
+3. 計算 I/O、MMIO32、MMIO64 與 Prefetchable 資源需求。
+4. 配置 Bus Number 與 BAR。
+5. 啟動裝置 Driver。
+6. 建立 Block I/O、Simple File System、Network、Graphics Output 等高階 Protocol。
+
+若裝置在 Setup 或 OS 看不到，需分辨問題位於：
+
+- 硬體 Link 未成立。
+- PCI Enumeration 未找到裝置。
+- 資源配置失敗。
+- Driver 未派送或未 Binding。
+- 高階 Protocol 未建立。
+- BDS 未連接對應裝置路徑。
+
+### 2.4.7 DXE 階段主要檢查點
+
+- DXE Core 是否開始執行。
+- HOB List 是否能被正確解析。
+- DXE Firmware Volume 是否被發現。
+- 目標 DXE Driver 是否派送。
+- 必要 Protocol 是否安裝。
+- PCI／USB／Storage／Network／Console 是否完成初始化。
+- UEFI Memory Map 與資源分配是否合理。
+- Variable Service、Timer、Watchdog 與 Runtime Driver 是否可用。
+- EndOfDxe 等關鍵事件是否發生。
+- 是否成功進入 BDS。
+
+---
+
+## 2.5 BDS、Boot Manager 與 OS Loader
+
+### 2.5.1 BDS 的角色
+
+BDS（Boot Device Selection）將 DXE 建立的韌體能力轉為實際開機政策。其典型責任包括：
+
+- 建立或連接 Console。
+- 連接開機所需的 Controller。
+- 讀取 BootOrder、Boot####、BootNext 等 UEFI Variables。
+- 套用平台 Boot Policy。
+- 顯示 Setup、Boot Menu 或錯誤介面。
+- 嘗試啟動 UEFI Application、Recovery Image 或 OS Loader。
+
+### 2.5.2 UEFI Boot Option
+
+Boot Option 通常由下列資訊組成：
+
+- Attributes。
+- Description。
+- EFI Device Path。
+- Optional Data。
+
+常見相關 Variable：
+
+| Variable | 用途 |
+|---|---|
+| BootOrder | 指定 Boot#### 的嘗試順序 |
+| Boot#### | 描述單一 Boot Option |
+| BootNext | 指定下一次開機優先嘗試的項目 |
+| BootCurrent | 表示本次實際使用的 Boot Option |
+| DriverOrder／Driver#### | 管理 UEFI Driver Option，是否使用依平台需求而定 |
+
+Boot Option 存在不代表一定有效。還需確認 Device Path 可解析、對應 Controller 已連接、檔案系統可讀、Loader 存在，並通過安全性驗證。
+
+### 2.5.3 Boot Manager 流程
+
+簡化流程：
+
+```mermaid
+flowchart TD
+    A[進入 BDS] --> B[初始化 Console 與平台政策]
+    B --> C[讀取 BootNext / BootOrder]
+    C --> D[連接 Boot Option 所需裝置]
+    D --> E[解析 Device Path]
+    E --> F[載入 UEFI Image]
+    F --> G{驗證與 LoadImage 成功?}
+    G -- 否 --> H[記錄失敗並嘗試下一項]
+    H --> C
+    G -- 是 --> I[StartImage]
+    I --> J{OS Loader 是否接手?}
+    J -- 否 --> H
+    J -- 是 --> K[ReadyToBoot / ExitBootServices]
+```
+
+### 2.5.4 Removable Media 與預設路徑
+
+UEFI 支援可移除媒體預設開機檔名。實際檔名依處理器架構而異。排查 USB 或可移除媒體開機時，需確認：
+
+- 分割表與 EFI System Partition 是否符合預期。
+- 檔案系統是否被韌體支援。
+- 預設 Loader 路徑與架構是否正確。
+- Secure Boot Policy 是否允許該映像。
+- USB／Storage Controller 是否已在 BDS 嘗試前連接。
+
+### 2.5.5 Secure Boot 與映像驗證邊界
+
+若平台啟用 Secure Boot，LoadImage／StartImage 路徑可能包含映像簽章與信任資料庫檢查。排查時應區分：
+
+- 找不到裝置。
+- 找不到檔案。
+- PE/COFF 映像格式不被接受。
+- 映像驗證失敗。
+- Loader 已啟動但自行返回錯誤。
+
+安全性問題應保留驗證失敗狀態與事件紀錄，不應以永久關閉驗證作為正式修正方式。
+
+### 2.5.6 BDS 階段主要檢查點
+
+- Console Input／Output／Error 是否建立。
+- BootOrder、BootNext 與 Boot#### 是否可正常讀取。
+- Boot Option 的 Device Path 是否指向現有裝置。
+- 對應 Controller 是否已 Connect。
+- Block I/O 與 Simple File System Protocol 是否存在。
+- Loader 是否成功 LoadImage／StartImage。
+- Secure Boot 驗證結果是否符合 Policy。
+- 啟動失敗後是否會嘗試下一個 Boot Option 或進入 Recovery。
+
+---
+
+## 2.6 ReadyToBoot、ExitBootServices 與 Runtime
+
+### 2.6.1 ReadyToBoot
+
+ReadyToBoot Event 表示平台即將進入 OS Loader 的最後開機階段。不同 Driver 可利用此事件完成必要收尾，例如：
+
+- 更新或安裝最終平台資料表。
+- 完成部分安全量測或事件紀錄。
+- 鎖定某些平台設定。
+- 儲存開機統計資訊。
+
+ReadyToBoot 不等同於 Boot Services 已結束。此時 OS Loader 仍可使用 Boot Services。
+
+### 2.6.2 GetMemoryMap 與 MapKey
+
+OS Loader 在呼叫 ExitBootServices 前，需取得最新 UEFI Memory Map 與對應 MapKey。若其間又有記憶體配置或釋放，MapKey 可能失效，ExitBootServices 會失敗。因此常見 Loader 流程為：
+
+1. 呼叫 GetMemoryMap 取得所需 Buffer Size。
+2. 配置足夠 Buffer。
+3. 再次呼叫 GetMemoryMap 取得最新 Memory Map 與 MapKey。
+4. 避免再做不必要的記憶體配置。
+5. 呼叫 ExitBootServices。
+6. 若因 MapKey 改變而失敗，重新取得 Memory Map 後再嘗試。
+
+### 2.6.3 ExitBootServices
+
+ExitBootServices 成功後：
+
+- UEFI Boot Services 不再可用。
+- Boot Services Code／Data 可由 OS 回收。
+- OS 接管中斷、記憶體與裝置管理。
+- 僅 Runtime Services 與標示為 Runtime 的區域可依規格繼續保留。
+
+韌體 Driver 不應在 ExitBootServices 後繼續依賴 Boot Services Protocol、Event 或記憶體配置功能。
+
+### 2.6.4 Runtime Services
+
+常見 Runtime Services 包括：
+
+- GetTime／SetTime。
+- GetVariable／SetVariable。
+- GetNextVariableName。
+- ResetSystem。
+- SetVirtualAddressMap／ConvertPointer。
+- UpdateCapsule／QueryCapsuleCapabilities，實際可用性依平台與 OS 支援而定。
+
+Runtime Driver 與資料需使用正確的 Runtime Memory Type，並在虛擬位址切換時處理指標轉換。相關錯誤可能只在 OS 啟動後、變數存取、RTC 存取、Reset 或 Capsule Update 時出現。
+
+### 2.6.5 ExitBootServices 前後的責任邊界
+
+| 項目 | ExitBootServices 前 | ExitBootServices 後 |
+|---|---|---|
+| 記憶體配置 | 可使用 Boot Services | 由 OS 管理 |
+| Protocol／Handle | 可查詢與連接 | 不應再由 OS Loader 依賴 |
+| 裝置驅動 | UEFI Driver 可控制裝置 | 由 OS Driver 接管 |
+| Console | UEFI Console 可用 | 依 OS 接管狀態而定 |
+| Runtime Services | 已建立，可被呼叫 | 僅保留規格允許的 Runtime 服務 |
+| Memory Map | 仍可能變動 | ExitBootServices 後固定交由 OS 解讀 |
+
+---
+
+## 2.7 觀測點、POST Code 與 Serial Log
+
+### 2.7.1 建立可觀測性
+
+早期開機除錯的困難在於完整 Console 尚未建立。建議依平台能力分層配置觀測點：
+
+1. Hardware Checkpoint／POST Code。
+2. GPIO Toggle 或 Logic Analyzer 訊號。
+3. Early Serial Port。
+4. BMC／CPLD 擷取的 Port 80／Checkpoint。
+5. RAM Log／Trace Hub／平台除錯介面。
+6. UEFI Shell、Debug Protocol 與 OS Log。
+
+### 2.7.2 POST Code 設計原則
+
+POST Code 應具備：
+
+- 階段可辨識性，例如 SEC、PEI-before-memory、PEI-after-memory、DXE、BDS。
+- 重要里程碑與錯誤點使用不同區間或編碼方式。
+- 文件化 Code、模組、條件與可能下一步。
+- 避免不同模組重複使用同一 Code 而無法區分。
+- 對重置前最後 Code 提供保存方式，必要時由 BMC／CPLD 記錄。
+
+### 2.7.3 Serial Log 應包含的資訊
+
+建議至少包含：
+
+- 韌體版本、Build ID、平台 ID、Board Revision 與 Boot Mode。
+- 階段進入與離開標記。
+- 重要模組名稱與返回狀態。
+- Memory Init 結果與記憶體摘要。
+- DXE Driver Dispatch、Protocol／Controller 失敗摘要。
+- BootOrder、被選 Boot Option 與 LoadImage／StartImage 結果。
+- ReadyToBoot、ExitBootServices 嘗試與 Runtime 交接資訊。
+
+敏感資料、金鑰、驗證材料、未遮罩的序號或認證資訊不應寫入一般 Log。
+
+### 2.7.4 階段對應的觀測建議
+
+| 最後觀測點 | 優先檢查 | 常用資料 |
+|---|---|---|
+| 無輸出 | Reset、映像映射、供電、Clock、Strap | 示波器、SPI Trace、JTAG、CPLD 狀態 |
+| SEC | Temporary RAM、Stack、PEI Core 定位 | POST Code、Early Serial、Map File |
+| PEI Before Memory | PEIM Depex、Silicon Init、SPD、Memory Policy | PEI Log、Training Log、硬體量測 |
+| PEI After Memory | Migration、HOB、DXE FV、DXE IPL | HOB Dump、Firmware Volume 結構 |
+| DXE | Driver Dispatch、Protocol、PCI／Storage／Console | DXE Log、Handle/Protocol Dump |
+| BDS | Boot Variable、Device Path、File System、Secure Boot | Boot#### Dump、Device Path、驗證狀態 |
+| OS Loader | Memory Map、ACPI、ExitBootServices、Loader 自身 | Loader Log、Memory Map、ACPI Dump |
+| OS Runtime | Runtime Mapping、Variable、RTC、Reset、Capsule | OS dmesg／Event Log、Runtime Driver Log |
+
+---
+
+## 2.8 驗證與測試策略
+
+### 2.8.1 測試基準資訊
+
+每次測試應記錄：
+
+- BIOS 版本、Commit ID、Build Type 與設定檔。
+- CPU／SoC Stepping、PCH、Board Revision、CPLD／BMC／ME／PSP 版本。
+- DIMM、PCIe Card、Storage、USB 與其他外接裝置配置。
+- Secure Boot、TPM、CSM／Legacy Mode 等功能狀態。
+- Boot Mode、BootOrder 與 Variable 初始狀態。
+- 電源條件、環境溫度及是否使用外部除錯工具。
+
+### 2.8.2 開機情境覆蓋
+
+| 情境 | 驗證目的 | 建議觀測項目 |
+|---|---|---|
+| Cold Boot | 完整初始化路徑 | 各階段時間、Memory Training、裝置枚舉 |
+| Warm Reset | 重置後狀態清理與重用 | Boot Mode、裝置狀態、Variable、Reset Cause |
+| AC Cycle | 失去待機電源後的完整恢復 | Strap、CPLD/BMC 時序、RTC、NVRAM |
+| S3 Resume | Resume 專用路徑 | Boot Script、記憶體內容、裝置恢復 |
+| Firmware Update 後首次開機 | 新映像與資料格式轉換 | Capsule 結果、Variable Migration、Recovery |
+| Recovery Boot | 主映像失效時復原能力 | Recovery FV、媒體偵測、映像驗證 |
+| 不同 SKU | 平台差異與資源配置 | Board ID、Policy、GPIO、PCIe、Memory Topology |
+
+### 2.8.3 錯誤注入
+
+可依專案條件執行：
+
+- 移除或替換 DIMM、Storage、USB 開機媒體。
+- 建立無效 Boot Option 或遺失 Loader。
+- 使用不受信任或損壞的 UEFI Image。
+- 模擬 Firmware Volume、Variable Store 或 Capsule 損壞。
+- 讓指定裝置不回應、Link Down 或資源不足。
+- 在更新過程模擬斷電，驗證回復與資料完整性。
+
+錯誤注入應在可控環境進行，並預先準備硬體復原、SPI 重燒與 Variable 清除方式。
+
+### 2.8.4 Pass／Fail 定義
+
+Pass／Fail 不應只以「有進 OS」判斷。建議同時確認：
+
+- 所有預期階段與關鍵事件均出現。
+- 無未處理 ASSERT、Exception、Watchdog Reset 或重試迴圈。
+- Memory Map、SMBIOS、ACPI 與裝置資源符合平台規格。
+- Boot Option 選擇與安全政策符合設定。
+- ExitBootServices 成功，OS 無 Runtime／ACPI／PCI 資源錯誤。
+- 開機時間與各階段時間落在規格範圍。
+- 失敗情境能進入預期的錯誤處理或 Recovery 路徑。
+
+---
+
+## 2.9 常見問題與排查流程
+
+### 2.9.1 建議排查順序
+
+1. 固定測試條件與映像版本。
+2. 取得最後 POST Code、最後 Serial Log 與 Reset Cause。
+3. 判定最後完成的階段。
+4. 對照下一階段所需輸入、介面與資源。
+5. 比較正常板與異常板、正常版本與異常版本的差異。
+6. 一次只改動一個變因，保留完整測試紀錄。
+7. 修正後覆蓋 Cold Boot、Warm Reset、AC Cycle、不同 SKU 與更新情境。
+
+### 2.9.2 常見症狀
+
+| 症狀 | 可能所在階段 | 優先觀測點 | 建議排查方向 |
+|---|---|---|---|
+| 完全無 POST Code | Reset／SEC | Reset Pin、SPI CS/CLK、Boot Strap | 映像映射、供電、Clock、CPU Reset、Flash 存取 |
+| SEC 後立即停機 | SEC | Temporary RAM Checkpoint、Stack | CAR／SRAM 設定、Stack、PEI Core 定位 |
+| 每次停在不同早期位置 | SEC／PEI | Exception、Watchdog、Migration Log | Stack／記憶體損壞、未初始化資料、時序不穩 |
+| Memory Init 失敗 | PEI | Training Code、SPD、Memory Policy | DIMM 拓撲、供電、Clock、Policy、Silicon 版本 |
+| Memory Discovered 後重置 | PEI | Migration 前後 Log、HOB | Temporary RAM Migration、永久記憶體配置、指標 |
+| DXE Core 未進入 | PEI／DXE IPL | DXE IPL Log、FV/HOB | DXE FV、DXE Core FFS、解壓縮、驗證、載入位址 |
+| 某 DXE Driver 未執行 | DXE | Dispatcher Log、Depex | FV 掃描、Depex、Protocol、映像驗證 |
+| PCIe 裝置不存在 | DXE | Link、Bus Scan、BAR 配置 | Reset/Clock、Lane 設定、Enumeration、MMIO 資源 |
+| Storage 可見但不可開機 | DXE／BDS | Block I/O、File System、Boot#### | Partition、Device Path、Loader 路徑、安全驗證 |
+| Boot Option 消失或順序改變 | BDS | Variable Store、BootOrder | Variable 寫入、Default Policy、裝置路徑穩定性 |
+| ExitBootServices 失敗 | OS Loader | Memory Map、MapKey、Event | GetMemoryMap 重試、晚期配置、Loader 問題 |
+| OS 啟動後 Variable／RTC 異常 | Runtime | Runtime Map、OS Log | Runtime Memory Type、SetVirtualAddressMap、Driver |
+| 更新失敗後無法復原 | Update／Recovery | Capsule Status、Recovery Log | A/B Layout、映像驗證、斷電保護、回復政策 |
+
+### 2.9.3 問題收斂範例：有 PEI Log，但沒有 DXE Log
+
+建議依序查：
+
+1. Memory Discovered PPI 是否已安裝。
+2. Temporary RAM Migration 是否成功。
+3. HOB List 是否有效，DXE Firmware Volume HOB 是否存在。
+4. DXE IPL 是否被派送，Depex 是否滿足。
+5. DXE Core FFS 與 PE/COFF Section 是否存在且可解析。
+6. 映像驗證、解壓縮與重定位是否成功。
+7. DXE Core Entry 前後加入最小 Checkpoint，區分載入失敗與 Entry 後失敗。
+
+### 2.9.4 問題收斂範例：BDS 找不到可開機裝置
+
+建議依序查：
+
+1. PCI／USB／Storage Controller 是否已枚舉。
+2. Block I/O Protocol 是否存在。
+3. 分割區 Handle 與 Simple File System Protocol 是否建立。
+4. Boot#### Device Path 是否能解析到現有 Handle。
+5. Loader 路徑與架構是否正確。
+6. LoadImage 返回狀態與 Secure Boot 驗證結果。
+7. Boot Option 失敗後是否繼續嘗試下一項或進入 Recovery。
+
+---
+
+## 2.10 安全性與相容性注意事項
+
+### 2.10.1 信任邊界
+
+- SEC／PEI 屬於早期可信運算基礎，任何未驗證外部資料都應限制解析範圍。
+- Firmware Volume、PEIM、DXE Driver、Option ROM 與 UEFI Application 的驗證政策應一致。
+- TPM 量測與 Secure Boot 驗證是不同機制，應分別確認結果與失敗處理。
+- Debug Interface、Manufacturing Mode 與測試金鑰需有量產關閉策略。
+
+### 2.10.2 Variable 與敏感資料
+
+- UEFI Variable 應依需求設定 Non-Volatile、Boot Service、Runtime 與 Authenticated 屬性。
+- Log 不應輸出私鑰、明文密碼、完整認證資料或可被濫用的秘密。
+- Variable Store 滿載、損壞、回收與更新失敗都需要明確復原政策。
+
+### 2.10.3 相容性
+
+需確認：
+
+- UEFI Specification 與 PI Specification 版本。
+- EDK II／IBV 分支與工具鏈版本。
+- CPU／SoC／PCH Stepping 與 Microcode／Silicon Package。
+- OS 對 ACPI、SMBIOS、Runtime Services 與 Capsule 的支援。
+- 現有產品 Variable、Capsule、Flash Layout 與更新格式的向前／向後相容性。
+
+---
+
+## 2.11 建議檢查清單
+
+### SEC／PEI
+
+- [ ] Reset Vector 與 Firmware Mapping 已確認。
+- [ ] SEC Entry、Temporary RAM 與初始 Stack 可觀測。
+- [ ] PEI Core 可被定位並正確進入。
+- [ ] PEIM、PPI、Depex 與 Firmware Volume 關係已確認。
+- [ ] Memory Init、Memory Discovered 與 Temporary RAM Migration 有明確 Log。
+- [ ] HOB List 包含後續所需的記憶體、資源、CPU 與 Firmware Volume 資訊。
+
+### DXE
+
+- [ ] DXE IPL 可載入 DXE Core。
+- [ ] 目標 DXE Driver 被派送，必要 Protocol 已安裝。
+- [ ] PCI、Storage、USB、Network 與 Console 流程符合平台需求。
+- [ ] Memory Map 與資源配置無明顯衝突。
+- [ ] Variable、Runtime、ACPI 與 SMBIOS 相關模組在正確時機完成。
+
+### BDS／OS 交接
+
+- [ ] Console 與 Boot Manager 可用。
+- [ ] BootOrder、BootNext、Boot#### 與 Device Path 正確。
+- [ ] Loader 可被 LoadImage／StartImage，安全驗證符合 Policy。
+- [ ] ReadyToBoot 與 ExitBootServices 流程可重複通過。
+- [ ] OS 啟動後 Runtime Services、ACPI 與裝置資源無錯誤。
+
+### 回歸測試
+
+- [ ] Cold Boot、Warm Reset、AC Cycle 均已覆蓋。
+- [ ] 不同 DIMM、Storage、PCIe Card 與 SKU 已覆蓋。
+- [ ] 更新、降版、Recovery 與斷電情境已覆蓋。
+- [ ] 正常與異常 Log、POST Code、版本與硬體配置均已保存。
+
+---
+
+## 2.12 本章重點
+
+- UEFI PI 將開機流程拆成 SEC、PEI、DXE 與 BDS，各階段具有不同資源條件與交接介面。
+- SEC 的重點是建立 Temporary RAM、初始 Stack，並把控制權交給 PEI Core。
+- PEI 的關鍵里程碑是 Memory Discovered、Temporary RAM Migration 與 HOB List 建立。
+- DXE 透過 Driver Dispatch、Protocol 與 Handle Database 建立完整 UEFI 執行環境。
+- BDS 依平台政策與 UEFI Variables 選擇 Boot Option，並啟動 OS Loader。
+- ExitBootServices 是韌體與 OS 的重要責任邊界，Runtime Services 需使用正確的記憶體屬性與位址轉換流程。
+- 排查時應先判定最後完成的階段，再檢查下一階段所需的輸入、資源與介面，避免同時改動過多變因。
+
+## 2.13 參考資料
+
+- UEFI Forum, *UEFI Specification*。
+- UEFI Forum, *UEFI Platform Initialization Specification*。
+- TianoCore EDK II Documentation 與 EDK II Source Tree。
+- TCG, *PC Client Platform Firmware Profile Specification*，依平台適用性引用。
+- ACPI Specification、SMBIOS Specification 與 PCI Firmware Specification，依章節內容引用。
+- CPU／SoC／PCH 供應商 Firmware Support Package、BIOS Writer's Guide 與平台設計文件。
+- 專案內部 Firmware Map、POST Code、Boot Flow、Issue、驗證報告與硬體設計文件。
