@@ -34,7 +34,6 @@
 - [釐清 Secure Boot 與網路開機](#57-secure-bootpxehttp-boot-與-os-loader)
 - [執行驗證與問題排查](#58-驗證測試與問題排查)
 
----
 
 ## 5.1 Boot Manager 與 UEFI Variable 模型
 
@@ -147,7 +146,6 @@ Boot0007 = USB Removable Media
 | Boot Option | 可啟動映像 | OS Loader、UEFI Shell、網路開機程式、Recovery Image |
 | Driver Option | UEFI Driver | Option ROM Driver、裝置支援 Driver、平台擴充 Driver |
 
----
 
 ## 5.2 EFI_LOAD_OPTION 與 Device Path
 
@@ -322,7 +320,6 @@ Optional Data Length
 Creation Source
 ```
 
----
 
 ## 5.3 Platform Boot Policy 與預設順序
 
@@ -395,7 +392,6 @@ Setup 畫面可能只是 `BootOrder` 的視覺化，也可能維護另一份內�
 4. 恢復預設值時是否保留 OS Boot Option。
 5. Firmware Update 後 Variable Migration 是否改變順序。
 
----
 
 ## 5.4 Removable Media、Fallback 與 Recovery
 
@@ -483,7 +479,6 @@ Recovery 可能由下列條件觸發：
 
 若 recovery 本身啟動失敗，平台應進入可診斷狀態，例如顯示錯誤碼、保留 serial log、等待管理介面介入，而非持續無限 reset。
 
----
 
 ## 5.5 Hotkey、Front Page、Timeout 與 Setup
 
@@ -532,7 +527,6 @@ Fast Boot 可能延後或略過部分裝置連接，因此會影響：
 
 若平台支援 Fast Boot，測試矩陣應分別涵蓋啟用與停用狀態。
 
----
 
 ## 5.6 Boot Option 建立、刪除、去重與排序
 
@@ -644,7 +638,6 @@ Boot Option 可能由多個來源建立：
 
 不可在未保留必要安全變數的前提下，直接以「清空全部 NVRAM」作為正式修復方式。
 
----
 
 ## 5.7 Secure Boot、PXE／HTTP Boot 與 OS Loader
 
@@ -737,7 +730,6 @@ Firmware Update 或恢復預設後，應特別驗證：
 - 多磁碟、多 OS、BitLocker／磁碟加密情境是否受影響
 - `BootCurrent` 與 OS 所見內容是否一致
 
----
 
 ## 5.8 驗證、測試與問題排查
 
@@ -888,7 +880,6 @@ flowchart TD
 | Update | 更新前、更新後、降版、更新中斷、Recovery |
 | SKU | 各 Board Revision、NIC／Storage 組合、客戶設定 |
 
----
 
 ## 平台例外註記
 
@@ -903,7 +894,6 @@ flowchart TD
 
 平台例外不代表略過驗證。每一項例外至少應記錄適用 SKU、啟用條件、替代觀測點、Pass／Fail 判準，以及 Firmware Update 與恢復預設值後的回歸範圍。
 
----
 
 ## 5.9 安全性、相容性與維護建議
 
@@ -930,7 +920,6 @@ flowchart TD
 - 修改排序或刪除政策時，同步更新測試矩陣與 Firmware Update 回歸項目。
 - 對外提供的 Setup 欄位、BMC API 與 OS 工具行為應保持一致。
 
----
 
 ## 5.10 本章重點
 
