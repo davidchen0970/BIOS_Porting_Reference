@@ -39,7 +39,6 @@
 - [查閱常見問題](#29-常見問題與排查流程)：依症狀建立分叉點並完成根因隔離。
 - [使用階段閘門](#211-階段閘門與決策樹)：以 Green／Yellow／Red 條件判斷是否可進入下一階段。
 
----
 
 ## 2.1 UEFI PI 開機架構概觀
 
@@ -93,7 +92,6 @@ flowchart TD
 
 > 在進入各階段細節前，讀者可先參閱 [2.11 階段閘門與決策樹](#211-階段閘門與決策樹)，先將目前狀態分類為 Green、Yellow 或 Red，再進入細節分析。這可避免在尚未建立分叉點時直接修改原始碼、更換硬體或反覆重刷韌體。
 
----
 
 ## 2.2 Reset Vector、SEC 與 Temporary RAM
 
@@ -191,7 +189,6 @@ Temporary RAM Migration 的本質不只是複製資料，而是把 PEI Core、St
 - **Yellow**：SEC 可前進，但存在非致命的校正、量測、平台識別或早期 Log 缺口。可進 PEI，但需保留風險與補測項目。
 - **Red**：Temporary RAM、Stack、映像驗證或 PEI Core 定位失敗。系統不得以未定義狀態繼續，應進入平台定義的停機、Recovery 或受控 Reset 路徑。
 
----
 
 ## 2.3 PEI Core、PEIM 與永久記憶體建立
 
@@ -323,7 +320,6 @@ GUID HOB 適合傳遞跨階段必要資料，但應管理版本、長度、欄�
 - **Yellow**：永久記憶體與 DXE 入口成立，但記憶體降速、部分通道停用、可復原 Training Warning 或非關鍵平台 Policy 未完成。可依產品政策繼續，但必須記錄降級狀態。
 - **Red**：Memory Init、Migration、HOB 完整性或 DXE IPL 前置條件失敗。系統應進入受控錯誤處理、Recovery 或 Reset Loop Protection，不應直接跳入 DXE。
 
----
 
 ## 2.4 DXE IPL、DXE Core 與 Driver Dispatch
 
@@ -450,7 +446,6 @@ DXE 常見裝置流程包含：
 - **Yellow**：非開機必要裝置失敗、資源降級、Option ROM 或附加功能不可用，但開機路徑與安全政策仍完整。是否繼續由產品政策決定。
 - **Red**：Boot Device 所需 Controller、核心 Protocol、System Table、Memory Map、Variable Service 或 Runtime 基礎失敗。應停止進入一般 BDS，改走錯誤介面或 Recovery。
 
----
 
 ## 2.5 BDS、Boot Manager 與 OS Loader
 
@@ -545,7 +540,6 @@ UEFI 支援可移除媒體預設開機檔名。實際檔名依處理器架構而
 - **Yellow**：第一順位 Boot Option 失敗，但替代 Boot Option、Removable Media Fallback 或受控 Recovery 可成功接手，且失敗原因已有紀錄。
 - **Red**：所有允許的 Boot Option 均失敗、Variable Store 不可用、安全政策遭破壞，或 Loader 無法被驗證。系統應進入明確的 Recovery／Error UI，不應無限重試。
 
----
 
 ## 2.6 ReadyToBoot、ExitBootServices 與 Runtime
 
@@ -623,7 +617,6 @@ OS 呼叫 `SetVirtualAddressMap()` 後，Runtime Driver 不可繼續使用僅在
 - **Yellow**：第一次 `ExitBootServices()` 因 MapKey 改變而失敗，但 Loader 能重新取得 Memory Map 並成功重試，且沒有持續的晚期配置來源。
 - **Red**：Memory Map 持續變動、Runtime 區域屬性錯誤、位址轉換失敗，或 OS 接管後立即重置。需回到 Loader／Runtime Driver 邊界完成根因隔離。
 
----
 
 ## 2.7 觀測點、POST Code 與 Serial Log
 
@@ -675,7 +668,6 @@ POST Code 應具備：
 | OS Loader | Memory Map、ACPI、ExitBootServices、Loader 自身 | Loader Log、Memory Map、ACPI Dump |
 | OS Runtime | Runtime Mapping、Variable、RTC、Reset、Capsule | OS dmesg／Event Log、Runtime Driver Log |
 
----
 
 ## 2.8 驗證與測試策略
 
@@ -772,7 +764,6 @@ Pass／Fail 不應只以「有進 OS」判斷。建議同時確認：
 
 此證據鏈的目的，是先區分「韌體停止前觸發硬體保護」與「韌體未前進而被 Watchdog 重置」，再分派後續分析範圍。
 
----
 
 ## 2.9 常見問題與排查流程
 
@@ -863,7 +854,6 @@ Pass／Fail 不應只以「有進 OS」判斷。建議同時確認：
 - **Yellow**：主要 Boot Option 失效，但 Removable Media Fallback 或 Recovery 正常，需修復 Variable 或裝置路徑持久性。
 - **Red**：物理裝置、資源配置、Block I/O、檔案系統或映像驗證任一關鍵層失敗，BDS 無法建立合法開機路徑。
 
----
 
 ## 2.10 安全性與相容性注意事項
 
@@ -890,7 +880,6 @@ Pass／Fail 不應只以「有進 OS」判斷。建議同時確認：
 - OS 對 ACPI、SMBIOS、Runtime Services 與 Capsule 的支援。
 - 現有產品 Variable、Capsule、Flash Layout 與更新格式的向前／向後相容性。
 
----
 
 ## 2.11 階段閘門與決策樹
 
@@ -996,7 +985,6 @@ flowchart TD
 - 正常與異常 Log、POST Code、波形、版本與硬體配置可回查。
 - Yellow 狀態均有風險說明、負責人、移除條件與回歸範圍；不得以未記錄 Yellow 狀態視同 Green。
 
----
 
 ## 2.12 本章重點
 
