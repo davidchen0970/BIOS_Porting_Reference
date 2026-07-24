@@ -1,6 +1,5 @@
 ## 4. HOB、Protocol、PPI 與 UEFI Service
 
-版本：Revision 3（依第二輪技術審閱意見補強）
 
 ### 適用範圍
 
@@ -8,11 +7,26 @@
 
 本章聚焦於 BIOS 移植、平台初始化與早期開機問題排查。SEC 的 CPU 初始狀態、完整 DXE Dispatcher 演算法、BDS 開機選項政策、作業系統 Runtime 行為及特定晶片供應商私有介面，僅在與本章主題直接相關時補充。
 
+> **平台適用性聲明**：本章所有介面、結構與行為以 UEFI／PI Specification 與 EDK II 主流實作為基礎。實際平台可能因 Silicon Vendor 的私有 PPI／Protocol、GUID HOB 欄位、Reset／Resume 行為、Silicon Package 或 BSP 整合方式而不同。進行 BIOS 移植、設計審查或問題排查時，仍應以專案採用的規格版本、供應商文件與 BSP 為最終依據。
+
 ### 適用讀者
 
 - 負責 BIOS、UEFI、EDK II、平台初始化或韌體移植的開發與整合人員。
 - 需要排查 PEI、DXE、BDS 階段模組相依、介面找不到、HOB 資料錯誤或 Driver Binding 問題的人員。
 - 撰寫 PEIM、DXE Driver、UEFI Driver、Application 或平台共用 Library 的工程人員。
+
+### 名詞與縮寫
+
+| 縮寫 | 英文全名 | 本章語意 |
+|---|---|---|
+| HOB | Hand-Off Block | PEI 向後續階段傳遞資訊的資料結構 |
+| PPI | PEIM-to-PEIM Interface | PEI 階段的模組間介面 |
+| PHIT | Phase Handoff Information Table | HOB List 的第一個 HOB，描述交接及記憶體邊界 |
+| FV | Firmware Volume | 保存 Firmware File 與模組的韌體容器 |
+| TPL | Task Priority Level | UEFI Boot Services Event 的執行優先層級 |
+| BDS | Boot Device Selection | 選擇與啟動開機目標的階段或邏輯 |
+| GCD | Global Coherency Domain | DXE Core 管理系統 Memory Space 與 I/O Space 的資源模型 |
+| EBS | ExitBootServices | OS Loader 結束 Boot Services 的生命週期切換點 |
 
 ### 快速導覽
 
@@ -26,6 +40,13 @@
 - [排查生命週期與所有權問題](#48-生命週期記憶體所有權與除錯)：常見錯誤、觀測點與驗證順序。
 - [執行驗證與回歸](#附錄-a驗證與測試檢查表)：測試矩陣、Pass／Fail 判定與紀錄欄位。
 - [快速選擇排查入口](#附錄-b極簡除錯決策樹)：依 PEI、DXE 與 OS Handoff 分流。
+
+### 建議使用場景
+
+- **新專案啟動或平台移植**：依序閱讀 4.1 至 4.7，建立 HOB、PPI、Protocol、Service 與 Driver Binding 的整體視角，再以 4.8 準備除錯觀測點。
+- **特定問題排查**：先查閱 4.8.2 的常見問題表與附錄 B 決策樹，再回到相對應的技術章節確認生命週期、所有權與介面契約。
+- **設計審查與程式審查**：使用 4.11 檢查清單，逐項確認 Producer／Consumer、記憶體類型、錯誤回收、Open／Close 關係與 Runtime 邊界。
+- **測試與回歸規劃**：使用附錄 A 建立測試矩陣、Pass／Fail 條件與測試紀錄。
 
 ---
 
@@ -55,10 +76,10 @@ flowchart LR
     DXE -->|Install / Open / Locate| PROTO[Handle & Protocol Database]
     DXE --> BDS[BDS / OS Loader]
     BDS --x|ExitBootServices：終止 Boot Services| OS[OS Runtime]
-    RT[Runtime Services API] -->|由 UEFI System Table 提供呼叫入口| OS
+    OS -.->|呼叫 UEFI Runtime Services API| RT[Runtime Services API]
 ```
 
-圖中的叉線代表生命週期切換，而非一般資料傳遞。`ExitBootServices()` 成功後，Boot Services 不再可用；OS 僅能依 UEFI Runtime 規則，透過 UEFI System Table 中的 Runtime Services Table 呼叫 Firmware 保留的 Runtime API。若 OS 已呼叫 `SetVirtualAddressMap()`，後續 Runtime 呼叫與相關指標必須使用該虛擬位址映射。
+圖中的叉線代表生命週期切換，而非一般資料傳遞。虛線代表 OS 透過 UEFI System Table 向 Firmware 的 Runtime Services API 發起呼叫，而非 Firmware 主動向 OS 推送資料。`ExitBootServices()` 成功後，Boot Services 不再可用；OS 僅能依 UEFI Runtime 規則呼叫 Firmware 保留的 Runtime API。若 OS 已呼叫 `SetVirtualAddressMap()`，後續 Runtime 呼叫與相關指標必須使用該虛擬位址映射。
 
 判讀問題時，可先依兩個問題分類：
 
@@ -232,6 +253,8 @@ return Status;
 
 上述 `Context` 必須位於回呼有效期間內仍可靠的儲存區；若通知可能跨越 Temporary RAM 遷移，需使用 PEI Foundation 可正確遷移的配置方式，或改以可查找的 PPI／HOB 表示狀態。
 
+若狀態必須跨越 Temporary RAM 遷移，不應保存 Stack 位址，也不宜只依賴可能因 PEIM Shadow／重新載入而重設的模組靜態變數。實務上可使用 `BuildGuidHob()` 將狀態放入 HOB List，並在每次使用時以 GUID 重新查找，不要長期快取遷移前取得的 HOB 資料指標。若永久記憶體已安裝，也可透過 PEI Memory Services 的 `AllocatePages()` 配置狀態；配置前須確認服務在目前 Boot Mode 與時間點可用，並由明確的 PPI、HOB 或資料結構保存其實體位址及長度。
+
 #### 4.4.3 常見時序
 
 ```mermaid
@@ -320,7 +343,7 @@ DXE 中的 Protocol 是由 GUID 識別的介面，安裝在 EFI Handle 上。一
 
 S4 通常由 OS 以休眠映像保存與恢復系統狀態，其資料契約與 S3 的 ACPI NVS 不完全相同。平台若支援 S3／S4，應分別驗證 Memory Map、ACPI Table、NVS 內容、Variable 與 Resume Flow。
 
-> **S3／S4 邊界提醒**：S3 一般會保留 DRAM 供電，Resume 時由 Firmware 重新進入早期恢復路徑，通常包括 PEI 與平台所需的有限 DXE／S3 Resume 元件；`EfiACPIMemoryNVS` 內的資料必須在進入 S3 前準備完成，並在恢復期間保持完整。S4 則可能完全斷電，OS 主要依休眠映像重建執行狀態，Firmware 不應假設前一次 S3 使用的 NVS 內容在 S4 Boot 後仍然存在。若同一結構同時參與 S3 與 S4 判斷，必須另外設計有效性標記、Boot Mode 檢查及冷啟動失效規則，避免把殘留或未初始化的 NVS 當成有效恢復資料。
+> **S3／S4 邊界提醒**：S3 一般會保留 DRAM 供電，Resume 時由 Firmware 重新進入早期恢復路徑，通常包括 PEI 與平台所需的有限 DXE／S3 Resume 元件；`EfiACPIMemoryNVS` 內的資料必須在進入 S3 前準備完成，並在恢復期間保持完整。S4（Hibernation）進入後系統可完全斷電，恢復時由 OS 從休眠映像重建狀態，Firmware 不應將 S3 路徑的 NVS 內容視為有效。若同一結構同時參與 S3 與 S4 判斷，必須另外設計有效性標記、Boot Mode 檢查及冷啟動失效規則，避免把殘留或未初始化的 NVS 當成有效恢復資料。
 
 #### 4.6.2 ExitBootServices 邊界
 
@@ -457,6 +480,8 @@ drivers            # 查看 Driver Binding 與管理狀態
 devices            # 查看 Controller／Child 關係
 ```
 
+若目前 Shell 不支援 `dh -p`，可先執行 `dh` 取得 Handle 清單，再使用 `dh <Handle>` 逐一檢視 Protocol。部分 EDK II Shell 版本亦支援 `dh -d` 顯示較詳細的 Device Path 或 Handle 資訊。實際參數應先以 `help dh` 確認，避免把不同 Shell 版本的選項直接混用。
+
 建議以「正常平台／異常平台」或「第一次 Connect／第二次 Connect」做差異比對，並把 Handle 值視為單次開機內的識別值，不要假設跨開機固定。
 
 ### 4.9 實作與排查入口
@@ -514,6 +539,16 @@ grep -R "gEfiDriverBindingProtocolGuid" -n --include='*.inf' --include='*.c' .
 - Protocol 不只是一個函式指標；Handle、Agent、Controller 與 Open Attributes 共同描述 Driver Model 關係。
 - ExitBootServices 是明確生命週期邊界，Runtime 路徑不可保留對 Boot Services Code／Data 的依賴。
 - 排查時先確認階段，再沿著 Producer、Database、Consumer、所有權與回收順序縮小範圍。
+
+### 修訂歷史
+
+| 版本 | 修訂摘要 |
+|---|---|
+| Rev 1 | 建立 HOB、PPI、Protocol、UEFI Service、Driver Binding、測試與排查的完整初稿 |
+| Rev 2 | 新增 HOB 指標警示、Handle 直覺說明、記憶體類型策略與 Driver Binding 交叉比對 |
+| Rev 3 | 補充 PPI Notify 防重入、S3／S4 邊界、Log 與 Shell 對照、Variable 安全性及除錯決策樹 |
+| Rev 4 | 完成 Runtime 圖形語意、CAR 遷移指引、Shell 相容方案、決策樹閉合與 DEBUG 資料清單 |
+| Final 1.0 | 新增縮寫表、平台適用性聲明、使用場景與修訂歷史，移除草稿狀態並定稿 |
 
 ### 4.13 參考資料
 
@@ -583,6 +618,11 @@ flowchart TD
     G2 --> M
     I --> M
     L --> M
+    M --> N{是否找到可解釋的差異？}
+    N -->|是| O[建立驗證假設並執行最小修改]
+    O --> A
+    N -->|否| P[重新檢視 DEBUG Mask、測試條件與資料完整性]
+    P --> A
 ```
 
 ### B.1 最小資料收集清單
@@ -592,4 +632,5 @@ flowchart TD
 - 涉及的 GUID、Handle、Agent、Controller、Instance 與 Open Attributes。
 - HOB Dump、PPI／Protocol 安裝順序、Memory Map 與 Device Path。
 - 正常平台與異常平台使用相同 DEBUG Mask、相同測試條件的差異 Log。
+- DEBUG Mask 與 Serial Log 輸出層級，包括實際啟用的 `DEBUG_ERROR`、`DEBUG_WARN`、`DEBUG_INFO`、`DEBUG_VERBOSE` 或專案自訂分類；同時記錄 Baud Rate、是否遺失早期 Log，以及 Log Buffer 是否截斷。
 - 修改前後的韌體 revision、硬體版本及回歸結果。
