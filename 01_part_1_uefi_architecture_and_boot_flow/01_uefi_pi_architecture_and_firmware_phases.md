@@ -1,6 +1,6 @@
 # UEFI／PI 架構與韌體執行階段
 
-> 文件狀態：Draft 2
+> 文件狀態：Draft 3
 >
 > 文件定位：BIOS／UEFI 平台初始化、除錯與設計審查的入門章節，也是後續 CPU、Memory、DXE Driver、BDS、ACPI、SMM／MM 與 Firmware Update 章節的共同基礎。
 >
@@ -10,20 +10,29 @@
 
 ## 快速導覽
 
-- [5 分鐘掌握開機主線](#0-5-分鐘入門uefi-開機流程速覽)：先理解 SEC、PEI、DXE、BDS、Runtime。
-- [確認規格與實作邊界](#3-uefi-與-pi-規格的定位及邊界)：區分 UEFI、PI、EDK II 與平台程式。
-- [依階段閱讀生命週期](#4-secpei-dxebds-與-runtime-的生命週期)：查看各階段責任、輸入、輸出與完成條件。
-- [追查介面與資料生命週期](#6-ppiprotocolhobevent-與-handle-database)：判斷資料由誰建立、何時有效、由誰消費。
-- [分析 Driver 未執行或裝置未出現](#7-architectural-protocol-與-driver-dispatch-相依關係)：區分 Dispatch、Connect 與 Driver Binding。
-- [分析 OS Hand-off 與 Runtime](#8-exitbootservices-前後可用服務差異)：確認 Memory Map、服務終止與位址轉換。
-- [建立 Log 與測試基準](#11-建議觀測點與-debug-資料)：統一版本、平台、階段與錯誤資訊。
-- [從現象開始排查](#13-常見問題與排查方向)：依「現象 → 階段 → 交接點 → 證據」縮小範圍。
+- [掌握完整開機主線](#0-5-分鐘入門uefi-開機流程速覽)：先確認 SEC、PEI、DXE、BDS 與 Runtime 的責任邊界。
+- [確認規格與實作邊界](#3-uefi-與-pi-規格的定位及邊界)：區分 UEFI、PI、EDK II 與平台政策。
+- [依階段分析生命週期](#4-secpei-dxebds-與-runtime-的生命週期)：查看各階段的必要條件、主要產出與完成判準。
+- [追查介面與資料生命週期](#6-ppiprotocolhobevent-與-handle-database)：確認建立者、消費者、有效期間與所有權。
+- [分析 Driver 派送與裝置連接](#7-architectural-protocol-與-driver-dispatch-相依關係)：區分 Dispatch、Connect 與 Driver Binding。
+- [分析 OS Hand-off 與 Runtime](#8-exitbootservices-前後可用服務差異)：確認 Memory Map、服務終止、Runtime Memory 與位址轉換。
+- [建立觀測與測試基準](#11-建議觀測點與-debug-資料)：統一版本、平台、階段、時間與錯誤資訊。
+- [從故障現象展開排查](#13-常見問題與排查方向)：依現象、可能方向、驗證方式與調整方向縮小範圍。
+
+### 依角色選擇閱讀路徑
+
+| 使用情境 | 建議順序 | 閱讀目標 |
+| --- | --- | --- |
+| 第一次接觸 UEFI／PI | 0 → 4 → 6 → 9 → 13 | 建立階段、交接點與核心資料結構的整體模型 |
+| 平台 Bring-up 與故障分析 | 13 → 4 → 9 → 6 → 8 | 從外觀定位階段，再檢查交接資料與服務狀態 |
+| 韌體架構與模組設計 | 3 → 5 → 6 → 7 → 8 → 14 | 確認規格邊界、Foundation、模組相依與安全責任 |
+| 測試與驗證 | 4.0 → 9 → 11 → 12 → 13 | 建立可觀測里程碑、測試矩陣與通過條件 |
 
 ### 任務導向入口
 
-| 目前任務 | 建議先讀 | 第一個要取得的證據 |
+| 目前任務 | 建議先讀 | 第一批必要證據 |
 | --- | --- | --- |
-| 新平台第一次開機 | 0、4、9、11 | 最早 POST Code、Serial Byte、SPI Flash 活動 |
+| 新平台第一次開機 | 0、4、9、11 | 最早 POST Code、Serial Byte、SPI Flash 活動、Reset Cause |
 | Memory Training 後停住 | 4.2、5.4、6.1、6.3、13.3 | Memory Discovered、Memory Migration、HOB Dump |
 | DXE Driver 沒有執行 | 4.3、7.1、7.4、13.4 | FV 內容、Depex、映像驗證、Protocol 生產者 |
 | Driver 有 Entry Log，但裝置不存在 | 6.5、6.6、7.3、13.5 | Controller Handle、Supported／Start、Child Handle |
@@ -37,7 +46,7 @@
 
 ### 0.1 UEFI、PI、EDK II 是什麼？
 
-| 名詞 | 解釋 | 白話理解 |
+| 名詞 | 解釋 |  |
 | --- | --- | --- |
 | UEFI（Unified Extensible Firmware Interface，統一可延伸韌體介面） | 定義韌體、UEFI 程式與 OS Loader 之間的標準介面 | 開機期間大家共同遵守的溝通規則 |
 | PI（Platform Initialization，平台初始化） | 定義韌體內部如何分階段完成平台初始化 | 韌體內部的施工流程與交接規則 |
@@ -70,9 +79,11 @@ flowchart TD
 ```
 
 
-### 0.4 為什麼一定要先判斷階段？
+### 0.4 階段定位是第一個必要判斷
 
-同樣是「開不了機」，在不同階段代表的方向完全不同：
+> **排查原則**：在修改 Driver、Policy 或硬體設定前，應先辨識最後成功階段與下一個未完成交接點。若階段尚未確認，第一輪工作應補齊 Serial Log、POST Code、GPIO、Flash Bus 或 Trace 等觀測證據。
+
+同樣是「開不了機」，在不同階段對應的檢查方向不同：
 
 - SEC 沒有進展，優先看 Power、Reset、Clock、Flash Mapping 與 Temporary RAM。
 - PEI 停住，優先看 DRAM Training、PPI 相依性、Memory Migration 與 HOB。
@@ -80,18 +91,17 @@ flowchart TD
 - BDS 停住，優先看 Console、Boot Variable、Device Path 與 OS Loader。
 - OS 接管後才出錯，優先看 ACPI、Runtime Memory、SMM／MM 與 OS Driver 交接。
 
-如果還不能說出「最後成功的是哪個階段」，第一輪工作不是修改 Driver，而是補齊能辨識階段的 Serial Log、POST Code 或硬體觀測點。
 
 ### 0.4.1 統一排查方法
 
 本章後續排查表均使用同一個順序：
 
-1. **現象**：記錄停滯、重置、錯誤碼、耗時或裝置缺失，不先推定原因。
-2. **最後成功點**：找出最後一筆可信的 Log、POST Code、Protocol、PPI 或硬體訊號。
-3. **下一個交接點**：列出進入下一階段所需的記憶體、映像、資料結構與服務。
-4. **證據比對**：比對 Known-good Log、Build Report、HOB、Handle／Protocol、Memory Map 與硬體量測。
-5. **最小變更驗證**：一次只改一個條件，保留版本、設定、測試路徑與結果。
-6. **回歸範圍**：除目標路徑外，同時驗證 Cold Boot、Warm Reset、Update、Recovery 與 Runtime。
+1. 現象：記錄停滯、重置、錯誤碼、耗時或裝置缺失，不先推定原因。
+2. 最後成功點：找出最後一筆可信的 Log、POST Code、Protocol、PPI 或硬體訊號。
+3. 下一個交接點：列出進入下一階段所需的記憶體、映像、資料結構與服務。
+4. 證據比對：比對 Known-good Log、Build Report、HOB、Handle／Protocol、Memory Map 與硬體量測。
+5. 最小變更驗證：一次只改一個條件，保留版本、設定、測試路徑與結果。
+6. 回歸範圍：除目標路徑外，同時驗證 Cold Boot、Warm Reset、Update、Recovery 與 Runtime。
 
 ```text
 Platform/Board/SKU:
@@ -366,6 +376,13 @@ SEC 不宜承擔大型裝置初始化。此階段可用資源最少，錯誤處�
 - POST Code 數值由平台定義，不能直接假設某個固定數值一定代表 SEC。
 
 </details>
+#### SEC 完成判準
+
+- [ ] 處理器已離開 Reset Vector，且可由 Trace、POST Code、GPIO 或 Serial 證明。
+- [ ] Temporary RAM 與初始 Stack 位於預期範圍，沒有覆蓋 Flash、MMIO 或保留區。
+- [ ] PEI Core 與初始 Firmware Volume 可被定位及讀取。
+- [ ] 傳入 PEI Core 的平台資訊、Boot Mode 與 Firmware Volume 資訊有效。
+
 ### 4.2 PEI：建立永久記憶體並描述平台狀態
 
 > 總結：PEI 的首要任務是把 DRAM 準備好，並用 HOB 告訴 DXE「平台目前有哪些資源」。
@@ -406,6 +423,13 @@ PEI 通常不是完整裝置驅動環境。此階段應聚焦於 DXE 所需的�
 - 若 Memory Discovered 後立即停住，優先檢查 Memory Migration、HOB 與舊 Temporary RAM 指標。
 
 </details>
+#### PEI 完成判準
+
+- [ ] `EFI_PEI_PERMANENT_MEMORY_INSTALLED_PPI` 對應的永久記憶體里程碑已成立。
+- [ ] Temporary RAM Migration 已完成，PPI、Notify、Stack 與平台資料不再引用失效區域。
+- [ ] HOB List 至少包含有效 PHIT、Resource Descriptor、Memory Allocation、CPU 與必要 Firmware Volume 資訊。
+- [ ] DXE IPL 已定位並驗證 DXE Core，且具備建立 DXE Stack 的可用記憶體。
+
 ### 4.3 DXE：建立完整 UEFI Driver 與服務環境
 
 > 總結：DXE 建立 UEFI 的主要服務框架，載入 Driver，並把控制器轉成可供開機流程使用的裝置介面。
@@ -434,6 +458,22 @@ DXE 的執行順序不是單純依 FDF 檔案排列。Dispatcher 會根據 Drive
 - 因此應同時檢查 Dispatch 與 Connect，不要只看 Driver 是否被載入。
 
 </details>
+#### DXE 完成判準
+
+- [ ] DXE Core 已接受 HOB List，Memory Services、Handle Database、Protocol Database 與 Event 可用。
+- [ ] 平台要求的 Architectural Protocol 已安裝。
+- [ ] 必要 Driver 已完成 Dispatch，必要 Controller 已完成 Connect。
+- [ ] Console、Boot Device、ACPI、SMBIOS、Variable 與平台要求的安全服務已達到 BDS 前置條件。
+
+#### Driver 已載入但裝置未出現的檢查序列
+
+1. 確認 Driver 是否安裝 `EFI_DRIVER_BINDING_PROTOCOL`。
+2. 確認目標 Controller Handle 與上層 I/O Protocol 是否存在。
+3. 確認平台流程是否呼叫 `ConnectController()`，或是否採用延後連接政策。
+4. 記錄 `Supported()` 的輸入 Handle、Protocol Open 狀態與回傳值。
+5. 記錄 `Start()` 的資源配置、硬體初始化與錯誤路徑。
+6. 若為 Bus Driver，確認 Child Handle、Device Path 與目標 I/O Protocol 是否建立。
+
 ### 4.4 BDS：套用平台開機政策並選擇 OS Loader
 
 > 總結：BDS 不再負責建立底層硬體，而是決定「從哪裡、以什麼政策啟動哪一個 OS Loader」。
@@ -461,6 +501,13 @@ BDS 找到 OS Loader 後，不會立即失去控制權。OS Loader 仍在 Boot S
 - 應分別確認裝置、Partition、File System、Boot Option 與 Image 驗證。
 
 </details>
+#### BDS 完成判準
+
+- [ ] Console 與必要 Controller 已依平台政策連接。
+- [ ] `BootOrder`、`BootNext` 與對應 `Boot####` 的屬性及 Device Path 一致。
+- [ ] 選定媒體可提供可讀取的 File System 與 OS Loader。
+- [ ] 映像驗證、Secure Boot Policy 與失敗後 Recovery 路徑均有可觀測結果。
+
 ### 4.5 Runtime：OS 接管後仍保留的韌體服務
 
 > 總結：OS 接管後，大多數 UEFI 功能結束，只留下 Variable、Time、Reset、Capsule 等少量 Runtime Services。
@@ -487,6 +534,14 @@ Runtime Driver 必須正確處理實體位址轉虛擬位址、記憶體屬性�
 
 </details>
 
+
+#### Runtime 交接完成判準
+
+- [ ] OS Loader 使用最新 Memory Map 與 Map Key 成功呼叫 `ExitBootServices()`。
+- [ ] Exit Boot Services Callback 未非法配置記憶體，且必要 DMA／Interrupt 已停止或完成責任移交。
+- [ ] Runtime Code、Runtime Data 與 Runtime MMIO Region 的型別及屬性正確。
+- [ ] Virtual Address Change 後仍會使用的指標均納入轉換與驗證範圍。
+- [ ] Variable、Time、Reset 與平台宣告支援的 Runtime Service 通過 OS 端測試。
 
 ## 5. PEI Foundation、DXE Foundation 與 Core 元件
 
@@ -558,6 +613,12 @@ PPI 是 PEIM 之間交換服務與狀態的主要方式。PPI 以 GUID 辨識，
 
 重要原則：PPI 的介面與其背後資料必須在有效生命週期內。Temporary RAM 遷移後，若 PPI 仍指向未遷移的 Stack 或暫存區域，可能在 Memory Discovered 後產生難以重現的錯誤。
 
+#### PPI 常見誤用
+
+- PPI Interface 或其私有資料仍指向 Temporary RAM，Memory Migration 後形成失效指標。
+- 使用 Notify 補償本應由 Depex 表達的必要相依，造成執行順序難以追蹤。
+- 以 PPI 是否存在代表硬體一定完成初始化，但未定義資料有效性與錯誤狀態。
+
 ### 6.2 Protocol：DXE 與 UEFI 階段的服務契約
 
 Protocol 以 GUID 識別並安裝在 Handle 上。它可表示一項服務、裝置能力、Driver Binding 關係或狀態。
@@ -571,6 +632,12 @@ Protocol 以 GUID 識別並安裝在 Handle 上。它可表示一項服務、裝
 5. 卸載或停止 Driver 時，依規則關閉關係並移除 Protocol。
 
 Protocol 是否存在，常被 Dispatcher 或 Driver 用來判斷相依條件。除錯時應同時確認「Protocol 是否已安裝」與「安裝在哪一個 Handle」，不能只看 GUID 名稱。
+
+#### Protocol 常見誤用
+
+- Protocol 安裝在不符合裝置模型的 Handle，導致 Consumer 找到介面卻無法建立正確 Controller／Child 關係。
+- Driver 以 `HandleProtocol()` 取得介面，但未依 Driver Model 建立 `OpenProtocol()` 關係。
+- Driver Stop 或卸載時未關閉 Protocol 關係，造成 Controller 無法 Disconnect 或資源無法釋放。
 
 ### 6.3 HOB：PEI 傳給 DXE 的單向資料鏈
 
@@ -587,6 +654,14 @@ HOB 是 Hand-Off Block 的縮寫。PEI 使用 HOB List 描述平台資源與初�
 
 HOB 適合傳遞「階段交接資料」，不適合作為任意雙向通訊機制。DXE 消費 HOB 後若需要持續更新狀態，通常應轉換成 Protocol、Configuration Table、Variable 或平台資料結構。
 
+#### HOB 常見誤用
+
+- 將 HOB 當作 DXE 階段的動態資料庫，在 Consumer 間修改或延伸其內容。
+- GUID HOB 缺少版本、長度或有效值定義，使不同韌體版本對同一資料產生不同解讀。
+- HOB 中保存 Temporary RAM Pointer、未驗證的實體位址或超出資源描述範圍的位址。
+
+HOB 應視為 PEI 交付給 DXE 的輸入快照。若資料需要在 DXE 持續更新，應在消費後轉換為有明確所有權的 Protocol、Configuration Table、Variable 或平台資料結構。
+
 ### 6.4 Event：以時機與狀態變化觸發 Callback
 
 UEFI Event 可用於：
@@ -599,6 +674,12 @@ UEFI Event 可用於：
 - Reset Notification
 
 Event Callback 應保持短小，並遵守 Task Priority Level。Callback 中執行耗時輪詢、遞迴安裝 Protocol、取得不適合目前 TPL 的 Lock，可能造成 Deadlock、不可預期的重入或開機延遲。
+
+#### Event 常見誤用
+
+- Callback 執行長時間輪詢、阻塞等待或大量裝置存取。
+- 在不適合的 TPL 取得 Lock、配置記憶體或呼叫受限制的服務。
+- ReadyToBoot、ExitBootServices 或 VirtualAddressChange Callback 缺少重入與多次通知防護。
 
 ### 6.5 Handle Database：DXE 的物件關係圖
 
@@ -753,6 +834,21 @@ OS Loader 通常會：
 
 > 使用原則：Boot Services 只可在 `ExitBootServices()` 成功前呼叫；Runtime Services 雖可保留到 OS 階段，但仍受 Memory Type、虛擬位址轉換、並行、安全與平台實作能力限制。
 
+### 8.2.1 案例：Map Key 在交接前失效
+
+**現象**：OS Loader 偶發收到 `EFI_INVALID_PARAMETER`，無法完成 `ExitBootServices()`。
+
+**證據**：第一次 `GetMemoryMap()` 後，某個 ReadyToBoot／ExitBootServices 相關路徑配置了 Pool，使 Memory Map 與 Map Key 改變；Loader 仍使用舊 Map Key 呼叫 `ExitBootServices()`。
+
+**驗證方式**：
+
+1. 記錄每次 `GetMemoryMap()` 的 Map Key、Descriptor Size、Descriptor Version 與 Map Size。
+2. 在所有 Exit 相關 Event 前後記錄 Memory Map 變化。
+3. 確認 Loader 在 `EFI_INVALID_PARAMETER` 後會重新取得 Memory Map 並重試。
+4. 檢查韌體 Callback 是否能移除不必要的記憶體配置。
+
+**調整方向**：Loader 應使用最新 Map Key 並保留規格要求的重試路徑；韌體端應避免在最後交接期間產生非必要的 Memory Map 變動。
+
 ### 8.3 服務可用性比較
 
 | 項目 | `ExitBootServices()` 前 | `ExitBootServices()` 後 |
@@ -788,6 +884,21 @@ Runtime Code、Runtime Data 及 MMIO Runtime Region 必須在 Memory Map 中標�
 - SMM Communication Buffer 位址或屬性不一致
 - MMIO Region 未標示 Runtime Attribute
 
+
+### 8.6 案例：Runtime Pointer 未完成轉換
+
+**現象**：系統已進入 OS，但第一次或特定時機呼叫 `SetVariable()` 時發生例外、重置或無回應。
+
+**證據**：Runtime Driver 的全域 Context 已配置為 Runtime Data，但 Context 內部仍保存實體位址；Virtual Address Change Callback 只轉換最外層指標，未處理內部 Function Pointer、Buffer Pointer 或 MMIO Pointer。
+
+**驗證方式**：
+
+1. 列出 Runtime Driver 在 `ExitBootServices()` 後仍會存取的所有全域與巢狀指標。
+2. 確認其所在頁面具備正確 Runtime Memory Type 與 Attribute。
+3. 在 Virtual Address Change Callback 前後記錄指標值與轉換結果。
+4. 分別測試實體位址模式與虛擬位址模式下的 Variable、Reset、Time 路徑。
+
+**調整方向**：建立 Runtime Pointer 清單，逐項定義是否需 `ConvertPointer()`；避免 Runtime Context 引用 Boot Services Code／Data 或缺少 Runtime Attribute 的 MMIO Region。
 
 ## 9. 從 Reset 到 OS Hand-off 的整體時序
 
@@ -990,16 +1101,53 @@ flowchart TD
 - Permanent Memory 範圍錯誤
 - DXE IPL Stack／Page Allocation 問題
 
+#### 案例：HOB 長度錯誤使 DXE 最早期停止
+
+**現象**：Memory Training 完成，DXE IPL 已找到 DXE Core，但 DXE Core 進入後立即產生例外。
+
+**分析資料**：某 GUID HOB 的 Payload 結構已增加欄位，但建立 HOB 時仍使用舊長度。後續 HOB 走訪取得錯誤邊界，使 Consumer 讀取到不完整資料。
+
+**驗證方式**：
+
+1. Dump 完整 HOB List，逐項檢查 Header Type、HobLength、Alignment 與 End-of-HOB Marker。
+2. 核對 GUID HOB 的結構版本、Payload 長度與 Consumer 預期大小。
+3. 與 Known-good 版本比較 HOB 順序與總長度。
+4. 在建立端與消費端加入長度、版本及欄位範圍檢查。
+
+**調整方向**：為跨模組 GUID HOB 加入版本與長度欄位，建立端使用實際結構大小，消費端拒絕小於最低支援長度的資料。
+
 ### 13.4 DXE Driver 沒有執行
 
-建議確認：
+| 現象 | 可能方向 | 驗證方式 | 調整方向 |
+| --- | --- | --- | --- |
+| FV 中找不到 Driver | FDF 未納入、條件式排除、載入了不同 FV | 檢查 Build Report、FV／FFS Dump 與實際 Flash Image | 修正 FDF、SKU 條件或 Firmware Volume 配置 |
+| Driver 存在但無 Entry Log | Depex 未滿足、Apriori／SOR、映像驗證失敗 | 解碼 Depex，列出所需 Protocol，檢查 Security／Image Verification Log | 修正 Depex 或 Protocol 生產時機；若為安全拒絕，修正簽章或 Policy |
+| 只有特定 SKU 未執行 | PCD、Feature Flag、Board ID、Silicon Policy 或 FDF 條件不同 | 比對兩個 SKU 的 Build Report、PCD、FV 與早期 Policy Log | 將產品差異集中於可追蹤的 Policy 或建置條件 |
+| 更新版本後順序改變 | Protocol 生產者、Depex、Library Constructor 或 FV 配置改變 | 比對 Dispatch Log、Protocol 安裝時間與版本差異 | 恢復明確相依，避免依賴偶然的派送順序 |
+| Entry Point 被呼叫後立即返回錯誤 | Library／Protocol 前置條件、資源配置或平台 Policy 不符 | 記錄 Entry Point 回傳值、ASSERT、Status Code 與依賴資源 | 修正錯誤路徑並保留可辨識的失敗資訊 |
 
-- Driver 是否位於實際載入的 FV
-- FFS／Section／Machine Type 是否正確
-- Depex 是否滿足
-- 依賴 Protocol 是否已安裝
-- Driver 是否因 Security Violation 被拒絕
-- INF Module Type、Entry Point 與 Library Instance 是否相容
+建議排查順序：
+
+1. 從實際 Flash Image 確認 FFS 是否存在，不只檢查編譯目錄。
+2. 確認 Machine Type、Subsystem、Section 與 Module Type 可被目前平台載入。
+3. 解碼 Depex，逐項核對所需 Protocol 是否已安裝及安裝時間。
+4. 檢查 Security Architectural Protocol、映像簽章與測量結果。
+5. 比對 Known-good 版本的 Dispatch 順序、FV 配置與平台 Policy。
+
+#### 案例：Depex 依賴的 Protocol 未被生產
+
+**現象**：Network DXE Driver 存在於 FV，映像驗證成功，但整個開機過程沒有 Entry Log。
+
+**分析資料**：Driver Depex 需要平台專屬 Network Policy Protocol；該 Protocol 的 Producer 因 Board ID 判斷不符而提前返回，Dispatcher 因此持續保留 Consumer Driver。
+
+**驗證方式**：
+
+1. 從 FFS Section 取得並解碼 Driver Depex。
+2. 在 EndOfDxe 前 Dump Protocol Database，確認目標 GUID 未出現。
+3. 追查 Producer Driver 的派送狀態、Board ID 輸入與回傳值。
+4. 比對正常 SKU 的 Board Policy 與 Protocol 安裝時間。
+
+**調整方向**：若該 Protocol 為必要依賴，修正 Producer 的平台條件或錯誤處理；若依賴並非必要，重新檢視 Depex 與 Driver 內部能力判斷的責任分配。
 
 ### 13.5 Driver 已執行但裝置不存在
 
@@ -1133,13 +1281,12 @@ UEFI／PI 開機流程可以濃縮成五個連續問題：
 
 > 參考規格版本應在專案開始時固定，並在文件首頁或平台版本矩陣中記錄。若規格、edk2 或 Silicon Package 升版，應重新執行階段交接、Memory Map、Driver Dispatch、ExitBootServices 與 Runtime Service 回歸測試。
 
-## 附錄 A：本次改寫重點
+## 附錄 A：本版修訂重點
 
-本版參考 BMC Build System／BSP 章節的任務導向寫法，保留原章技術內容，並補強：
-
-- 快速導覽與任務導向入口。
-- 「階段、輸入、輸出、交接點、觀測點」的一致描述模型。
-- 固定排查方法與問題摘要格式。
-- 規格要求、EDK II 參考實作、平台政策與常見現象的術語邊界。
-- 各階段最低交付物與審查問題。
-- 原有流程圖、排查表、測試矩陣、安全性與相容性內容的可查閱性。
+- 增加依角色區分的閱讀路徑，明確分隔階段、元件、交接與故障分析視角。
+- 將階段辨識提升為獨立排查原則，避免在交接點尚未定位前直接修改 Driver 或 Policy。
+- 為 SEC、PEI、DXE、BDS 與 Runtime 增加可測量的完成判準。
+- 為 PPI、Protocol、HOB 與 Event 增加常見誤用及資料生命週期限制。
+- 增加 Depex 未滿足、HOB 長度錯誤、Map Key 過期及 Runtime Pointer 未轉換等分析案例。
+- 將 DXE Driver 未執行改為「現象、可能方向、驗證方式、調整方向」結構。
+- 維持工程文件語氣，不使用口訣化、擬人化或過度簡化的教學措辭。
