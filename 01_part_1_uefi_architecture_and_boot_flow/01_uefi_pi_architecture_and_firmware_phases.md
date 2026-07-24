@@ -1,6 +1,6 @@
 # UEFI／PI 架構與韌體執行階段
 
-> 文件狀態：Draft 5
+> 文件狀態：Draft 6
 >
 > 文件定位：BIOS／UEFI 平台初始化、除錯與設計審查的入門章節，也是後續 CPU、Memory、DXE Driver、BDS、ACPI、SMM／MM 與 Firmware Update 章節的共同基礎。
 >
@@ -392,6 +392,8 @@ SEC 不宜承擔大型裝置初始化。此階段可用資源最少，錯誤處�
 | PEI Core 可交接 | SEC 入口與出口 Status Code、PEI Core Entry Log | PEI Core Entry 可觀測，傳入 FV 與平台資訊通過基本範圍檢查 | SEC Exit 與 PEI Entry 的連續時序 |
 
 > 數量、位址與耗時門檻應由平台基準檔定義，不以跨平台固定值判定。
+>
+> **平台例外註記**：若量產映像未提供 Serial、POST Port 或外部 Trace，平台仍需指定至少一個可重複取得的替代觀測點，例如 BMC Boot Progress、CPLD Scratch Register、Persistent Status Code 或實驗室專用 Trace Build。例外項目需記錄適用 Build Type、取得方式與證據保存位置。
 
 ### 4.2 PEI：建立永久記憶體並描述平台狀態
 
@@ -443,6 +445,8 @@ PEI 通常不是完整裝置驅動環境。此階段應聚焦於 DXE 所需的�
 | DXE Core 可載入 | DXE IPL Log、映像驗證結果 | DXE Core 可定位、驗證成功，Entry Point 與 Stack 建立成功 | FFS GUID、Authentication Status、Entry Address |
 
 > HOB 數量與總長度應與同一 Board、SKU、Boot Mode 的核准基準比較。固定要求特定數量，可能誤判合法的平台差異。
+>
+> **平台例外註記**：若 Silicon Package 將 Memory Training、Policy 或部分資源資訊封裝於供應商介面，無法取得完整內部 Log，至少需保存可外部驗證的永久記憶體範圍、HOB 結構檢查結果、Silicon Package 版本與其回傳狀態。例外不得省略 PEI 至 DXE 的必要交接證據。
 
 ### 4.3 DXE：建立完整 UEFI Driver 與服務環境
 
@@ -483,6 +487,8 @@ DXE 的執行順序不是單純依 FDF 檔案排列。Dispatcher 會根據 Drive
 | BDS 前置資料已發布 | ACPI、SMBIOS、Variable、Console 與 Boot Device 查詢 | 必要 Table、Variable 與 Protocol 可查得，內容通過平台 Schema 或基準檢查 | Table Hash、Variable 摘要、Console／Boot Device 清單 |
 
 > Driver Binding Handle 數量會隨平台、Option ROM 與功能組合變化。可自動化的判準應是「必要清單全部存在，且沒有非預期增減」，而不是固定要求至少若干 Handle。
+>
+> **平台例外註記**：若特定 SKU 未配置某類 Controller，或由 Option ROM、Silicon Binary、BMC 或其他管理處理器承擔相關功能，必要 Driver／Controller 清單需依 Board、SKU 與 Feature Policy 分版管理。排除項目應具備明確條件，不可只因本次 Dump 未出現就視為合法。
 
 #### Driver 已載入但裝置未出現的檢查序列
 
@@ -530,6 +536,8 @@ BDS 找到 OS Loader 後，不會立即失去控制權。OS Loader 仍在 Boot S
 | Recovery 路徑可進入 | 故障注入或移除主要 Boot Option | 主要路徑失敗後，在平台規定時間與重試次數內進入指定 Recovery／Fallback | 重試次數、耗時、最終選項 |
 
 > 時間與重試次數應記錄於平台測試規格，並依 Cold Boot、Warm Reset、Recovery 等路徑分別設定。
+>
+> **平台例外註記**：Headless Server 不必要求 VGA 或 USB Console Handle。此類平台可依產品設計，以 Serial Console、BMC SOL、Remote Console 或純 Boot Manager Log 作為 Console 證據；若平台刻意不提供互動式 Console，需改驗證錯誤回報、Boot Option 選擇與 Recovery 可觀測性。
 
 ### 4.5 Runtime：OS 接管後仍保留的韌體服務
 
@@ -569,6 +577,8 @@ Runtime Driver 必須正確處理實體位址轉虛擬位址、記憶體屬性�
 | Runtime Service 可用 | OS 測試程式與 Event Log | 平台宣告支援的 Variable、Time、Reset、Capsule 路徑均回傳允許狀態，且未出現新增 Exception／WHEA／韌體錯誤 | 測試案例、狀態碼與 OS Log |
 
 > 「OS 在固定秒數內沒有 Exception」可作為產品測試門檻，但不應被視為 UEFI 規格本身的完成定義。時間限制需由平台效能與可靠度規格另行訂定。
+>
+> **平台例外註記**：若目標 OS 不呼叫 `SetVirtualAddressMap()`、不支援 Capsule，或產品政策停用特定 Runtime Service，測試矩陣需明確標記 Not Applicable、替代驗證方式與政策來源，不得以缺少測試結果直接視為通過。
 
 ## 5. PEI Foundation、DXE Foundation 與 Core 元件
 
@@ -689,7 +699,17 @@ HOB 適合傳遞「階段交接資料」，不適合作為任意雙向通訊機�
 
 HOB 應視為 PEI 交付給 DXE 的輸入快照。若資料需要在 DXE 持續更新，應在消費後轉換為有明確所有權的 Protocol、Configuration Table、Variable 或平台資料結構。
 
-若 DXE 發現 HOB 資訊與實際硬體不一致，不建議直接覆寫原始 HOB。較可維護的處理方式是保留原始 HOB 作為輸入證據，驗證並建立修正後的平台資料，再透過 Protocol、Configuration Table 或其他具明確所有權的介面發布。若受既有平台限制而不得不採用相容性偏移，文件需記錄原因、適用 Board／SKU、消費者、失效條件與移除計畫，並避免其他模組同時解讀原始值與修正值。HOB 結構案例見 13.8 的 C2。
+若 DXE 發現 HOB 資訊與實際硬體不一致，不建議直接覆寫原始 HOB。較可維護的處理方式是保留原始 HOB 作為輸入證據，驗證並建立修正後的平台資料，再透過 Protocol、Configuration Table 或其他具明確所有權的介面發布。
+
+若平台因既有 Silicon Package、FSP 或相容性路徑限制，必須直接修正 HOB 內容或對特定欄位套用偏移，Code Review 不應只以「修改 HOB」作為退回依據，而應確認下列資訊是否完整：
+
+- 適用的 Silicon Package／FSP 版本、Board、SKU 與 Boot Mode。
+- 被修改的 HOB GUID、欄位、原始值、修正值與判斷條件。
+- 會消費原始值或修正值的模組，以及是否存在雙重解讀風險。
+- 不再需要相容性修正的失效條件與回歸測試。
+- 移轉至正式 Protocol、Configuration Table 或其他平台介面的負責人、追蹤項目與目標版本。
+
+此類處理應集中於單一相容層，避免多個 DXE Driver 分別修正同一資料。HOB 結構案例見 13.8 的 C2。
 
 ### 6.4 Event：以時機與狀態變化觸發 Callback
 
@@ -899,7 +919,7 @@ Runtime Code、Runtime Data 及 MMIO Runtime Region 必須在 Memory Map 中標�
 - SMM Communication Buffer 位址或屬性不一致
 - MMIO Region 未標示 Runtime Attribute
 
-Runtime Pointer 轉換失敗的完整分析見 13.8 的 C4。
+本節對應案例見 13.8 的 C4。
 
 
 ## 9. 從 Reset 到 OS Hand-off 的整體時序
@@ -1121,7 +1141,7 @@ flowchart TD
 4. 檢查 Security Architectural Protocol、映像簽章與測量結果。
 5. 比對 Known-good 版本的 Dispatch 順序、FV 配置與平台 Policy。
 
-Depex 與 Protocol Producer 的案例見 13.8 的 C1。
+本節對應案例見 13.8 的 C1。
 
 ### 13.5 Driver 已執行但裝置不存在
 
@@ -1181,6 +1201,8 @@ Depex 與 Protocol Producer 的案例見 13.8 的 C1。
 
 **調整方向**：若該 Protocol 為必要依賴，修正 Producer 的平台條件或錯誤處理；若依賴並非必要，重新檢視 Depex 與 Driver 內部能力判斷的責任分配。
 
+**相關判準／流程**：4.3「DXE 可觀測門檻」的 Architectural Protocol 與必要 Driver 項目；7.1「Dependency Expression」；7.4「常見派送問題：快速診斷入口」；13.4「DXE Driver 沒有執行」。
+
 #### C2：HOB 長度錯誤使 DXE 最早期停止
 
 **現象**：Memory Training 完成，DXE IPL 已找到 DXE Core，但 DXE Core 進入後立即產生例外。
@@ -1195,6 +1217,8 @@ Depex 與 Protocol Producer 的案例見 13.8 的 C1。
 4. 在建立端與消費端加入長度、版本及欄位範圍檢查。
 
 **調整方向**：為跨模組 GUID HOB 加入版本與長度欄位，建立端使用實際結構大小，消費端拒絕小於最低支援長度的資料。
+
+**相關判準／流程**：4.2「PEI 可觀測門檻」的 HOB List 結構檢查；5.4「DXE IPL 的交接角色」；6.3「HOB」與其常見誤用；13.3「Memory Discovered 後立即 Hang」。
 
 #### C3：Map Key 在交接前失效
 
@@ -1211,6 +1235,8 @@ Depex 與 Protocol Producer 的案例見 13.8 的 C1。
 
 **調整方向**：Loader 應使用最新 Map Key 並保留規格要求的重試路徑；韌體端應避免在最後交接期間產生非必要的 Memory Map 變動。
 
+**相關判準／流程**：4.5「OS Hand-off 與 Runtime 可觀測門檻」的 `ExitBootServices()` 與 Exit Callback 項目；8.1「OS Loader 呼叫流程」；8.4「ExitBootServices Event 的使用原則」；13.6「`ExitBootServices()` 失敗」。
+
 #### C4：Runtime Pointer 未完成轉換
 
 **現象**：系統已進入 OS，但第一次或特定時機呼叫 `SetVariable()` 時發生例外、重置或無回應。
@@ -1225,6 +1251,8 @@ Depex 與 Protocol Producer 的案例見 13.8 的 C1。
 4. 分別測試實體位址模式與虛擬位址模式下的 Variable、Reset、Time 路徑。
 
 **調整方向**：建立 Runtime Pointer 清單，逐項定義是否需 `ConvertPointer()`；避免 Runtime Context 引用 Boot Services Code／Data 或缺少 Runtime Attribute 的 MMIO Region。
+
+**相關判準／流程**：4.5「OS Hand-off 與 Runtime 可觀測門檻」的 Runtime Memory、Virtual Address 與 Runtime Service 項目；8.5「Runtime Memory 與虛擬位址轉換」；13.7「OS 進入後 Runtime Service 異常」。
 
 ## 14. 安全性與相容性注意事項
 
@@ -1328,9 +1356,9 @@ UEFI／PI 開機流程可以濃縮成五個連續問題：
 
 ## 附錄 A：本版修訂重點
 
-- 將 Depex、HOB、Map Key 與 Runtime Pointer 案例集中至 13.8，主文保留規則與交叉索引。
-- 將 7.4 定位為快速診斷入口，13.4 與 13.5 保留完整驗證流程，降低重複內容。
-- 將各階段完成判準改為「檢查項目、取得方式、通過條件、保存證據」結構。
-- 量化條件改由 Board、SKU、Boot Mode 與核准基準檔定義，不採用跨平台固定 Handle／HOB 數量。
-- 補充 DXE 發現 HOB 不一致時的處理原則：保留原始輸入，發布修正後且具明確所有權的新資料表示。
+- 在 13.8 的 C1 至 C4 增加「相關判準／流程」，建立案例至主文的反向追溯路徑。
+- 確認案例索引語句位於對應小節末尾，避免中斷通則說明。
+- 在 SEC、PEI、DXE、BDS、OS Hand-off／Runtime 的可觀測門檻後增加平台例外註記。
+- 對 Headless Server、無 Serial Build、封裝式 Silicon Package、未配置 Controller 與特定 Runtime Policy 定義例外記錄方式。
+- 補強既有 Silicon Package／FSP 必須修正 HOB 時的審查資料、相容層集中原則與移轉追蹤要求。
 - 維持工程文件語氣，不使用口訣化、擬人化或過度簡化的教學措辭。

@@ -1,6 +1,5 @@
 # 3. Firmware Volume、FFS 與映像檔配置
 
-狀態：Draft，寫作精煉版 v2  
 適用範圍：UEFI PI 架構、EDK II 平台韌體、BIOS Flash 映像檔分析與移植  
 
 > 本章以通用 UEFI PI 與 EDK II 架構說明 Firmware Device、Firmware Volume、FFS 與映像檔配置。實際 Flash Region、FV 名稱、容量、Base Address、Erase Block、簽章與更新策略，仍應以目標平台的 FDF、DSC、DEC、Flash Descriptor、Silicon 文件及量產更新規格為準。
@@ -89,6 +88,14 @@ flowchart LR
 - SEC／PEI FV 是否可被 CPU 讀取，FV Header 是否完整。
 - Early debug port、POST code 或 trace 是否在故障點之前已初始化。
 
+若可確認 SEC 已開始執行，但後續仍無輸出，優先檢查：
+
+- **早期觀測點**：基本 UART、POST code 或其他 Early Debug 輸出是否已初始化？
+- **暫時記憶體**：Cache-as-RAM、Temporary RAM 或其他平台暫存空間，是否足以容納 PEI Core 的解壓與初始化？
+- **早期韌體修補**：平台要求的 Microcode 或 Firmware Patch 是否已在規定時機載入？
+
+上述項目可協助區分「尚未進入 SEC」與「SEC 已執行，但暫時記憶體或 PEI 銜接失敗」兩類問題。
+
 ### 3.1.4 平台 Flash Map 建議表格
 
 專案文件至少應維護下列表格，並由建構產物或解析工具回查：
@@ -155,7 +162,7 @@ Free Space 是 FV 尚未配置為有效 FFS 的區域；Pad File 則可能是檔
 - Free Space 是否連續，能否容納預期新增檔案。
 - 新增模組後是否因對齊產生超出預期的 Padding。
 - 大型 FFS 是否跨越平台更新或驗證工具的限制。
-- 若需擴張 FV，依 3.7.5 的 Region 邊界與更新項目集中檢查。
+- FV 擴張前，應先檢查 3.7.5 中的 Region 邊界、Erase Block、更新清單及 Variable Store 重疊風險。
 - 壓縮率變化是否造成不同 Build 結果偶發超過容量。
 
 ### 3.2.5 容量不足的處理順序
@@ -230,10 +237,12 @@ FV 內以 FFS File 為主要管理單位。每個檔案通常由 Name GUID 識�
 
 本章採用下列用詞，避免「模組」同時指涉建構單位與映像內容：
 
-- **FFS 檔案**：FV 內的 binary 管理單位。
-- **INF 模組**：由 INF 描述的 EDK II 建構單位。
-- **PEIM／DXE Driver／Application**：依執行階段與 File Type 指稱可執行元件。
-- **元件**：不限定建構或執行層級時的泛稱。
+| 名詞 | 指涉範圍 |
+|---|---|
+| FFS 檔案 | FV 內的 binary 管理單位 |
+| INF 模組 | 由 INF 描述的 EDK II 建構單位 |
+| PEIM／DXE Driver／Application | 依執行階段與 File Type 指稱的可執行元件 |
+| 元件 | 不限定建構或執行層級時的泛稱 |
 
 ```text
 FFS File
@@ -372,18 +381,18 @@ Apriori 檔案提供一組優先調度的 FFS GUID 清單。它可用於早期�
 - FFS 即使列於 Apriori，必要的 PPI／Protocol 是否仍已存在。
 - GUID 是否與實際 FFS Name GUID 一致。
 - PEI Apriori 與 DXE Apriori 是否放在正確 FV。
-- 新增順序依賴是否掩蓋模組介面設計問題。
+- 新增順序依賴是否掩蓋元件介面設計問題。
 
 ### 3.6.3 Depex
 
-Depex 描述模組可被 Dispatcher 啟動的條件。常見邏輯包含 `AND`、`OR`、`NOT`、`TRUE`、`FALSE`，及依階段定義的特殊表示方式。
+Depex 描述 PEIM 或 DXE Driver 可被 Dispatcher 啟動的條件。常見邏輯包含 `AND`、`OR`、`NOT`、`TRUE`、`FALSE`，及依階段定義的特殊表示方式。
 
 排查 PEIM 或 DXE Driver 未啟動時，建議依序確認：
 
 1. 對應 FFS 檔案是否存在於已列舉的 FV。
 2. FFS File Type 是否符合目前 Dispatcher。
 3. Depex Section 是否存在且可正確解析。
-4. 每一個相依 GUID 是否已由其他模組安裝。
+4. 每一個相依 GUID 是否已由其他 PEIM、Driver 或 Foundation 元件安裝。
 5. 提供者是否因自身 Depex、載入錯誤或安全檢查而未執行。
 6. 是否有循環相依或 Dispatch 多輪後仍無法滿足的條件。
 
@@ -400,7 +409,9 @@ Debug 字串與工具命令會隨 EDK II 分支、平台 DebugLib、Shell 版本
 | 改 FDF 排列後才正常 | 比較 Apriori、Depex、PPI／Protocol 安裝順序及 Dispatch log | 元件間存在未宣告的先後假設 |
 | Recovery path 才失敗 | 比較正常 FV 與 Recovery FV 的 FFS manifest、Apriori、Depex 及解壓處理元件 | Recovery FV 缺少必要 FFS、解壓服務或驗證元件 |
 
-若平台沒有上述字串，建議在 Dispatcher、Image Loader、Security Handler 與 Protocol 安裝路徑增加可識別 GUID、Image Base、Entry Point 及 `EFI_STATUS` 的 Debug 訊息。
+各平台的 Debug Message 內容不盡相同，但常見關鍵字集中在 `Loading`、`Dispatch`、`StartImage`、`Security`、`Status =` 與 `Error =`。建議先保存一份相同平台、相同設定下的正常開機 Log，再由正常路徑反向建立階段、GUID、載入位址與狀態碼索引。
+
+若既有 Log 仍不足以判斷，則可考慮在關鍵路徑植入自訂 Debug Message。在 Dispatcher、Image Loader、Security Handler 與 Protocol 安裝路徑輸出 `GUID`、`ImageBase`、`EntryPoint` 與 `EFI_STATUS`，作為進一步定位的觀測依據。
 
 ## 3.7 映像檔解析、版控與差異比對方式
 
@@ -427,6 +438,18 @@ Step 6  對 PE32／TE 擷取 Machine、Entry Point、Subsystem、Size
 Step 7  將 GUID 對回 INF、FDF、符號檔與來源版本
 Step 8  產出可版控的文字／JSON／CSV 清單
 ```
+
+#### GUID 反向查找流程
+
+若要由映像檔中的 FFS GUID 追查原始碼或建構來源，建議依序處理：
+
+1. 搜尋專案 DEC／INF 檔案中的 `FILE_GUID = <GUID>`。
+2. 若未找到，判斷該 GUID 是否屬於 Protocol、PPI、HOB 或其他命名空間，再搜尋對應的 `gEfi...Guid`、`g...PpiGuid` 或專案 GUID symbol。
+3. 查閱 Build Report 中的 `Module GUID`、模組名稱與 FV 分配。
+4. 比對 FDF 的 `FILE`、`INF`、Apriori 與條件式配置。
+5. 回查 Build 目錄下的 `.map` 檔案、AutoGen 產生的 `.c`／`.h`、符號檔（如 `.pdb` 或 `.debug`），以及實際使用的 source revision（git tag／manifest）。
+
+若上述資料皆未命中，該 GUID 可能來自第三方 Binary、Silicon 封裝、預先產生的 FFS，或建構工具自動產生的內容。此時應查閱供應商文件、Release Note、binary manifest 或封裝工具輸出。
 
 ### 3.7.3 建議工具分工
 
@@ -552,7 +575,7 @@ FV、FFS 與 Section 是內容封裝格式，本身不等同於信任判定。�
 - Apriori 只提供優先調度清單；PEIM 或 Driver 能否執行，仍取決於 Depex、映像載入與安全驗證結果。
 - FDF 決定 FD／FV／FFS 的映像配置；DSC、INF、FDF、Build Report 與最終 binary 應能互相對應。
 - 容量規劃需保留成長、對齊、壓縮波動、簽章及更新需求，不能只以單次 Build 未 overflow 判定。
-- 版本差異應同時進行封裝層、結構層與模組層比對，降低 binary diff 的雜訊。
+- 版本差異比對應優先採用結構化清單，分別檢查封裝層、結構層與模組層，避免 binary diff 因時間戳或壓縮排列而產生誤判。
 
 ## 3.11 參考資料
 

@@ -1,6 +1,6 @@
 ## 4. HOB、Protocol、PPI 與 UEFI Service
 
-版本：Revision 2（依技術審閱意見補強）
+版本：Revision 3（依第二輪技術審閱意見補強）
 
 ### 適用範圍
 
@@ -25,6 +25,7 @@
 - [理解 Driver Binding](#47-handleagentcontroller-與-driver-binding)：Supported、Start、Stop 與控制器拓樸。
 - [排查生命週期與所有權問題](#48-生命週期記憶體所有權與除錯)：常見錯誤、觀測點與驗證順序。
 - [執行驗證與回歸](#附錄-a驗證與測試檢查表)：測試矩陣、Pass／Fail 判定與紀錄欄位。
+- [快速選擇排查入口](#附錄-b極簡除錯決策樹)：依 PEI、DXE 與 OS Handoff 分流。
 
 ---
 
@@ -53,8 +54,11 @@ flowchart LR
     IPL --> DXE[DXE Core / DXE Drivers]
     DXE -->|Install / Open / Locate| PROTO[Handle & Protocol Database]
     DXE --> BDS[BDS / OS Loader]
-    BDS -->|ExitBootServices| OS[OS Runtime]
+    BDS --x|ExitBootServices：終止 Boot Services| OS[OS Runtime]
+    RT[Runtime Services API] -->|由 UEFI System Table 提供呼叫入口| OS
 ```
+
+圖中的叉線代表生命週期切換，而非一般資料傳遞。`ExitBootServices()` 成功後，Boot Services 不再可用；OS 僅能依 UEFI Runtime 規則，透過 UEFI System Table 中的 Runtime Services Table 呼叫 Firmware 保留的 Runtime API。若 OS 已呼叫 `SetVirtualAddressMap()`，後續 Runtime 呼叫與相關指標必須使用該虛擬位址映射。
 
 判讀問題時，可先依兩個問題分類：
 
@@ -194,6 +198,40 @@ PPI（PEIM-to-PEIM Interface）是 PEI 階段的模組介面。PEIM 透過 GUID 
 
 DXE 的 Protocol Notification Event 才需要遵守 UEFI TPL 規則。事件在 `TPL_NOTIFY` 執行時不得阻塞；需要較長處理時，應只記錄必要狀態並 Signal 另一個較低 TPL 的 Event。`WaitForEvent()` 只能在 `TPL_APPLICATION` 呼叫，其他 Service／Protocol 也需依規格所列 TPL 限制使用。
 
+##### PPI Notify 防重入實作模式
+
+Notify 回呼可能因回呼內再次安裝相關 PPI，或因多個 Instance 依序出現而被重複觸發。防護不能只依靠單一靜態旗標，因為同一 PEIM 可能需要處理多個合法 Instance，Temporary RAM 遷移也可能影響狀態保存。建議依介面契約選擇以下方式：
+
+1. **完成 PPI 檢查**：回呼開始時先 `LocatePpi()` 查找專用的完成 PPI；若已存在，表示工作已完成，可直接返回。
+2. **狀態機／Instance 去重**：需要處理多個 Instance 時，以明確狀態與已處理 Instance 集合區分「尚未開始、執行中、完成、失敗」，不要用單一 Boolean 誤擋合法通知。
+3. **執行中防護**：進入工作前設定 `InProgress`，所有返回路徑都需清除或轉成終止狀態，避免錯誤路徑永久封鎖後續處理。
+4. **兩階段拆分**：Notify 僅驗證必要條件、記錄狀態並安裝「Ready／Completion PPI」，實際工作交由 Depex 依賴該 PPI 的後續 PEIM。這種方式較容易維持 PEI Dispatcher 的確定性，也符合 PEI 應縮短早期處理路徑的原則。
+
+概念性防護如下：
+
+```c
+Status = PeiServicesLocatePpi (
+           &gMyWorkCompletePpiGuid,
+           0,
+           NULL,
+           (VOID **)&CompletionPpi
+           );
+if (!EFI_ERROR (Status)) {
+  return EFI_SUCCESS;
+}
+
+if (Context->InProgress) {
+  return EFI_ALREADY_STARTED;
+}
+
+Context->InProgress = TRUE;
+Status = ValidateAndPublishReadyPpi ();
+Context->InProgress = FALSE;
+return Status;
+```
+
+上述 `Context` 必須位於回呼有效期間內仍可靠的儲存區；若通知可能跨越 Temporary RAM 遷移，需使用 PEI Foundation 可正確遷移的配置方式，或改以可查找的 PPI／HOB 表示狀態。
+
 #### 4.4.3 常見時序
 
 ```mermaid
@@ -281,6 +319,8 @@ DXE 中的 Protocol 是由 GUID 識別的介面，安裝在 EFI Handle 上。一
 5. 不要只因「資料很重要」就選 Runtime 或 Reserved。錯誤類型會增加 OS 保留記憶體、破壞 S3 Resume，或使 Runtime Pointer 轉換不完整。
 
 S4 通常由 OS 以休眠映像保存與恢復系統狀態，其資料契約與 S3 的 ACPI NVS 不完全相同。平台若支援 S3／S4，應分別驗證 Memory Map、ACPI Table、NVS 內容、Variable 與 Resume Flow。
+
+> **S3／S4 邊界提醒**：S3 一般會保留 DRAM 供電，Resume 時由 Firmware 重新進入早期恢復路徑，通常包括 PEI 與平台所需的有限 DXE／S3 Resume 元件；`EfiACPIMemoryNVS` 內的資料必須在進入 S3 前準備完成，並在恢復期間保持完整。S4 則可能完全斷電，OS 主要依休眠映像重建執行狀態，Firmware 不應假設前一次 S3 使用的 NVS 內容在 S4 Boot 後仍然存在。若同一結構同時參與 S3 與 S4 判斷，必須另外設計有效性標記、Boot Mode 檢查及冷啟動失效規則，避免把殘留或未初始化的 NVS 當成有效恢復資料。
 
 #### 4.6.2 ExitBootServices 邊界
 
@@ -383,6 +423,18 @@ flowchart TD
 
 Log 應避免只輸出「成功／失敗」，至少保留階段、GUID、Handle、位址、長度、Attributes 與 `EFI_STATUS`。
 
+##### Log 與 Shell 命令對照表
+
+| Log 中的關鍵訊息 | 對應 Shell 診斷方向 | 驗證目的 |
+|---|---|---|
+| `[DXE][PROTO] Install Handle=<handle>` | `dh <handle>` | 確認 Handle 上的 Protocol 集合與 Device Path 是否符合預期 |
+| `[DXE][OPEN] Agent=<agent> Controller=<ctrl>` | `openinfo <ctrl>` | 比對 Agent、Controller、Protocol GUID 與 Open Attributes |
+| `[DXE][DRV] Supported/Start/Stop` | `drivers`、`devices` | 檢查 Driver Binding 狀態、Controller 與 Child Handle 關係 |
+| `[UEFI][EBS] MapKey=<key>` | `memmap` | 比對 ExitBootServices 前的 Memory Map 類型、範圍與異常變化 |
+| Variable／Runtime 相關 Status | `dmpstore <VariableName>` | 確認 Variable 的 GUID、Attributes、資料大小與可見階段 |
+
+Shell 命令的參數與輸出格式可能隨 UEFI Shell 版本或平台整合內容不同，應先以 `help <command>` 確認。Handle 值只適合在同一次開機中與 Log 對照，不應跨開機硬性比對數字。
+
 #### 4.8.4 Driver Binding 交叉比對矩陣
 
 當 `Start()` 失敗時，不要只從最後一筆錯誤往回猜測。建議同步比對 Driver 行為、Handle Database 與硬體狀態：
@@ -434,6 +486,7 @@ grep -R "gEfiDriverBindingProtocolGuid" -n --include='*.inf' --include='*.c' .
 ### 4.10 安全性與相容性注意事項
 
 - 將 HOB、Protocol 與 Runtime Service 的輸入視為跨信任邊界資料，檢查長度、版本、範圍與 Integer Overflow。
+- 特別檢查 UEFI Variable 的名稱、Vendor GUID、`DataSize`、Attributes 與認證資料。`GetVariable()`／`SetVariable()` 可由 OS Runtime 呼叫，不能把輸入視為可信。除了限制資料長度與 NVRAM 配額，也需拒絕規格未定義的 Attribute 組合，確認既有 Variable 更新時的屬性相容性，並依政策檢查 `EFI_VARIABLE_NON_VOLATILE`、`EFI_VARIABLE_BOOTSERVICE_ACCESS`、`EFI_VARIABLE_RUNTIME_ACCESS` 及 authenticated-write 類屬性。安全敏感 Variable 不應只依名稱判斷權限。
 - 不透過 GUID HOB、Variable 或一般 DEBUG Log 暴露金鑰、密碼、Token 或敏感量測資料。
 - 安裝或覆寫安全相關 Protocol 前，確認呼叫階段、SMM／MM 邊界及存取權限。
 - 自訂 GUID 資料結構應具版本策略，避免 BIOS 更新後舊 DXE Driver 或 Capsule 路徑誤讀。
@@ -505,3 +558,38 @@ grep -R "gEfiDriverBindingProtocolGuid" -n --include='*.inf' --include='*.c' .
 - HOB／PPI／Protocol／Handle 差異，以及 Memory Map 與 Open 關係。
 - Pass／Fail 判定、已知限制、回歸範圍與附件位置。
 
+---
+
+## 附錄 B：極簡除錯決策樹
+
+```mermaid
+flowchart TD
+    A[發現開機或功能異常] --> B{第一個異常發生在哪個階段？}
+    B -->|PEI| C[檢查 PEIM Depex 與 PPI Database]
+    C --> C1{必要 PPI 是否已安裝？}
+    C1 -->|否| C2[追查 Producer、Boot Mode、FV 與 Dispatch Log]
+    C1 -->|是| D[檢查 Notify 次數、Instance 與防重入狀態]
+    D --> E[確認 HOB 的 GUID、Length、Offset 與資源範圍]
+    B -->|DXE| F{Driver Binding 是否成功？}
+    F -->|否| G[比對 Supported 與 Start 的第一個失敗點]
+    G --> G1[檢查 OpenProtocol Attributes 與既有 Agent]
+    G1 --> G2[檢查失敗路徑是否完整回收]
+    F -->|是| H[確認 Protocol 位於正確的 Controller 或 Child Handle]
+    H --> I[比對 Device Path、Open 關係與 Protocol Notification]
+    B -->|BDS / OS handoff| J[檢查 Memory Map、MapKey 與 ExitBootServices 重試]
+    J --> K[確認 ExitBootServices 後只保留 Runtime 依賴]
+    K --> L[檢查 Runtime Memory Type、Variable Attributes 與 Pointer 轉換]
+    E --> M[以正常與異常平台 Log 做差異比對]
+    G2 --> M
+    I --> M
+    L --> M
+```
+
+### B.1 最小資料收集清單
+
+- 第一個異常階段與可重現的 Reset／Boot Mode。
+- 第一筆錯誤 `EFI_STATUS`，不要只保留最後一筆連鎖錯誤。
+- 涉及的 GUID、Handle、Agent、Controller、Instance 與 Open Attributes。
+- HOB Dump、PPI／Protocol 安裝順序、Memory Map 與 Device Path。
+- 正常平台與異常平台使用相同 DEBUG Mask、相同測試條件的差異 Log。
+- 修改前後的韌體 revision、硬體版本及回歸結果。

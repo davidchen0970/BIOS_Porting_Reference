@@ -1,6 +1,5 @@
 # 2. SEC、PEI、DXE 與 BDS 開機流程
 
-版本：V2，已納入 Stage Gate、S3／S4、CAR 失效型態、MMIO Window、Runtime Virtual Address、Boot Time 與功耗監控。
 
 ## 適用範圍
 
@@ -36,7 +35,7 @@
 - [理解 BDS](#25-bds-boot-manager-與-os-loader)：Boot Policy、Boot Option 與載入 OS。
 - [理解 UEFI 與 OS 的邊界](#26-readytoboot-exitbootservices-與-runtime)：Boot Services 結束及 Runtime Services 保留方式。
 - [排查停機問題](#27-觀測點-post-code-與-serial-log)：依階段收集證據並縮小問題範圍。
-- [執行驗證](#28-驗證與測試策略)：Cold Boot、Warm Reset、AC Cycle、錯誤注入、時序及功耗監控。
+- [執行驗證](#28-驗證與測試策略)：Cold Boot、Warm Reset、AC Cycle、錯誤注入、Timing 與功耗監控。
 - [查閱常見問題](#29-常見問題與排查流程)：依症狀建立分叉點並完成根因隔離。
 - [使用階段閘門](#211-階段閘門與決策樹)：以 Green／Yellow／Red 條件判斷是否可進入下一階段。
 
@@ -91,6 +90,8 @@ flowchart LR
 3. PEI 可執行但 Memory Discovered 未出現，優先檢查 Memory Init、Silicon Policy、SPD、供電與時序條件。
 4. DXE 已開始但裝置不存在，檢查 HOB、Protocol 安裝、Driver Binding、PCI Enumeration 與裝置資源。
 5. BDS 已執行但無法啟動 OS，檢查 Boot Option、Device Path、檔案系統、Secure Boot 驗證與 OS Loader。
+
+> 在進入各階段細節前，讀者可先參閱 [2.11 階段閘門與決策樹](#211-階段閘門與決策樹)，先將目前狀態分類為 Green、Yellow 或 Red，再進入細節分析。這可避免在尚未建立分叉點時直接修改原始碼、更換硬體或反覆重刷韌體。
 
 ---
 
@@ -170,7 +171,9 @@ CAR 收斂方向：
 
 Temporary RAM Migration 的本質不只是複製資料，而是把 PEI Core、Stack、Heap 與相關內部參照重新錨定到永久記憶體。若遷移後仍有絕對指標、快取位址或模組私有資料指向已停用的 Temporary RAM，後續讀到的可能是已回收或不再一致的內容，可視為一種「幽靈資料（Ghost Data）」現象。
 
-因此，遷移問題可能造成隨機重置、返回位址錯誤、區域變數損壞、遷移後立即停機，或只在特定編譯最佳化與記憶體配置下出現。排查時除了比對複製範圍，也應檢查 PEI Core 內部資料庫、PPI 介面、Notify Descriptor、Stack Frame，以及平台私有指標是否已重定位或重新建立。
+具體症狀可能是 PEI Dispatcher 的目前模組 Context、PEIM Private Data、PPI Database Entry 或 Notify Descriptor 仍保留 CAR 位址，使後續 PPI 查找、Notify Callback 或下一個 PEIM 派送取得錯誤結構。EDK II 分支、IBV 實作與專案可能使用不同欄位名稱，因此應以實際 Map File、Private Header 與 Migration Log 確認，不宜只依賴單一欄位名稱。
+
+因此，遷移問題可能造成隨機重置、返回位址錯誤、區域變數損壞、遷移後立即停機，或只在特定編譯最佳化與記憶體配置下出現。根因隔離時除了比對複製範圍，也應檢查 PEI Core 內部資料庫、PPI 介面、Notify Descriptor、Stack Frame，以及平台私有指標是否已重定位或重新建立。
 
 ### 2.2.5 SEC 階段主要檢查點
 
@@ -257,10 +260,15 @@ Boot Mode 會影響 PEIM 執行路徑與後續初始化政策。常見模式包�
 
 - **一般 Cold Boot／Full Configuration**：執行完整 Silicon 與 Memory 初始化，適合建立基準 Log 與效能資料。
 - **S3 Resume**：通常走平台定義的記憶體恢復路徑，而非完整的 Cold-Boot Training，並依 ACPI S3 Boot Script 或等效保存資料恢復晶片組與裝置狀態。實際是否略過哪些 Memory Init 步驟由 Silicon 設計決定，不應一概視為完全不執行記憶體初始化。
-- **S4 Resume**：硬體初始化通常較接近一般開機，差異主要由 OS Loader 與休眠映像恢復流程處理。韌體仍需提供一致的 ACPI、Memory Map 與開機裝置路徑。
+- **S4 Resume**：硬體初始化通常較接近一般開機，差異主要由 OS Loader 與休眠映像恢復流程處理。韌體仍需提供相容的 ACPI、Memory Map 與開機裝置路徑。
+- **Warm Reset**：多數平台仍會重新進入 Reset Vector、SEC、PEI、DXE 與 BDS，但部分 Silicon、DRAM、PCIe 或周邊狀態可能被保留。韌體需先辨識 Reset Cause，再決定哪些初始化可以重用、哪些狀態必須清除。
 - **Recovery／Flash Update**：應限制非必要功能，保留映像驗證、斷電保護、版本政策與失敗回復能力。
 
-S3 問題的常見收斂方向包括 Boot Script 保存或執行不完整、PCIe／Clock／Reset 狀態未被正確恢復、裝置 Link Training 狀態與預期不同，或 Resume Path 使用了 Cold Boot 才會建立的資料。這些現象不宜直接歸因於記憶體控制器本身，需先以 Resume Checkpoint、Boot Script 與裝置恢復紀錄建立分叉點。
+> **S4／Hibernate 防禦性檢查**：S4 在硬體初始化層面通常接近 Cold Boot，不使用 S3 Boot Script 作為主要恢復路徑。OS Loader 會依休眠資訊、平台識別與韌體提供的系統描述判斷是否能恢復休眠映像。若 S4 前後的 ACPI Table、FACS 相關資訊、記憶體拓撲、保留區域或裝置路徑出現不相容變化，OS 可能放棄 Resume 並轉為一般開機。實際判定條件依 OS 與平台而異，排查時應保存 S4 前後的 ACPI Dump、Memory Map、Boot Variable 與 Loader Log，不宜只比對單一 DSDT 位址。
+
+S3 問題的常見收斂方向包括 Boot Script 保存或執行不完整、PCIe／RefClk（Reference Clock）／Reset 狀態未被正確恢復、裝置 Link Training 狀態與預期不同，或 Resume Path 使用了 Cold Boot 才會建立的資料。這些現象不宜直接歸因於記憶體控制器本身，需先以 Resume Checkpoint、Boot Script 與裝置恢復紀錄建立分叉點。
+
+S3 Boot Script 的內容通常保存在 ACPI NVS 或平台專屬的保留記憶體，實際位置與格式依 PI 實作、Silicon Package 與平台設計而定。若 Resume Path 誤走完整 Memory Training、保留區域遭覆寫，或 Script 所記錄的 PCIe／Chipset 設定已不符合目前裝置拓撲，可能造成 Resume 停機、裝置遺失或立即重置。根因隔離時應比對 S3 進入前的 Boot Script Save 紀錄、保存區域完整性，以及 Resume 時 Boot Script Execute 的返回狀態與失敗項目。
 
 ### 2.3.5 Memory Init 與 Memory Discovered
 
@@ -658,7 +666,7 @@ POST Code 應具備：
 
 | 最後觀測點 | 優先檢查 | 常用資料 |
 |---|---|---|
-| 無輸出 | Reset、映像映射、供電、Clock、Strap | 示波器、SPI Trace、JTAG、CPLD 狀態 |
+| 無輸出 | Reset、映像映射、供電、RefClk（Reference Clock）／System Clock、Strap | 示波器、SPI Trace、JTAG、CPLD 狀態 |
 | SEC | Temporary RAM、Stack、PEI Core 定位 | POST Code、Early Serial、Map File |
 | PEI Before Memory | PEIM Depex、Silicon Init、SPD、Memory Policy | PEI Log、Training Log、硬體量測 |
 | PEI After Memory | Migration、HOB、DXE FV、DXE IPL | HOB Dump、Firmware Volume 結構 |
@@ -687,7 +695,7 @@ POST Code 應具備：
 | 情境 | 驗證目的 | 建議觀測項目 |
 |---|---|---|
 | Cold Boot | 完整初始化路徑 | 各階段時間、Memory Training、裝置枚舉 |
-| Warm Reset | 重置後狀態清理與重用 | Boot Mode、裝置狀態、Variable、Reset Cause |
+| Warm Reset | 重置後狀態清理、保留與重新初始化 | Reset Cause、Boot Mode、DRAM／PCIe 保留狀態、Variable、Watchdog |
 | AC Cycle | 失去待機電源後的完整恢復 | Strap、CPLD/BMC 時序、RTC、NVRAM |
 | S3 Resume | Resume 專用路徑 | Boot Script、記憶體內容、裝置恢復 |
 | Firmware Update 後首次開機 | 新映像與資料格式轉換 | Capsule 結果、Variable Migration、Recovery |
@@ -749,6 +757,21 @@ Pass／Fail 不應只以「有進 OS」判斷。建議同時確認：
 
 建議同步保存示波器／電源分析儀波形、VR Telemetry、Reset Cause、Watchdog 狀態、POST Code 與階段時間戳，建立可重現的跨領域證據鏈。
 
+#### 跨領域證據鏈結
+
+冷開機重置應將軟體與硬體事件對齊到同一時間基準。若平台提供對應訊號，可同步量測 `PLTRST#`、CPU／SoC Thermal Throttle 或 `PROCHOT#`、VR Fault／Power Good、Watchdog Timeout GPIO，以及 POST Code Strobe。訊號名稱與可量測性依平台而異，不應假設所有架構都有相同腳位。
+
+例如，最後一筆 Serial Log 停在 Memory Training，不代表 Training 演算法一定失效。若在 Reset 前先出現 Thermal／Power Limit 或 VR Over-Current 事件，再由平台重置訊號接手，收斂方向應先放在功耗預算、VR 保護、上電時序或散熱條件；若硬體訊號穩定而 Watchdog 先到期，再回頭檢查 Training Timeout、死迴圈與 Log 阻塞。
+
+建議建立下列關聯：
+
+- Serial／Trace 時間戳對應 POST Code。
+- POST Code 對應 `PLTRST#`、Power Good 與 Watchdog Transition。
+- VR Telemetry 對應 CPU／DIMM／PCIe 上電與 Training 區段。
+- Reset Cause Register 對應 BMC／CPLD 保存的最後事件。
+
+此證據鏈的目的，是先區分「韌體停止前觸發硬體保護」與「韌體未前進而被 Watchdog 重置」，再分派後續分析範圍。
+
 ---
 
 ## 2.9 常見問題與排查流程
@@ -757,7 +780,7 @@ Pass／Fail 不應只以「有進 OS」判斷。建議同時確認：
 
 1. 固定測試條件與映像版本。
 2. 取得最後 POST Code、最後 Serial Log 與 Reset Cause。
-3. 以最後完成的階段建立第一個分叉點。
+3. 以最後完成的階段建立第一個分叉點（Bifurcation Point），再套用 [2.9.4 分層棋盤法（Layered Diagnostic Matrix）](#294-根因隔離範例bds-回傳-efi_not_found-或沒有可用-boot-option) 逐層推進。
 4. 對照下一階段所需輸入、介面與資源，定義收斂方向。
 5. 比較正常板與異常板、正常版本與異常版本的差異。
 6. 一次只改動一個變因，保留完整測試紀錄。
@@ -767,14 +790,14 @@ Pass／Fail 不應只以「有進 OS」判斷。建議同時確認：
 
 | 症狀 | 可能所在階段 | 優先觀測點 | 建議排查方向 |
 |---|---|---|---|
-| 完全無 POST Code | Reset／SEC | Reset Pin、SPI CS/CLK、Boot Strap | 映像映射、供電、Clock、CPU Reset、Flash 存取 |
+| 完全無 POST Code | Reset／SEC | Reset Pin、SPI CS/CLK、Boot Strap | 映像映射、供電、RefClk（Reference Clock）／System Clock、CPU Reset、Flash 存取 |
 | SEC 後立即停機 | SEC | Temporary RAM Checkpoint、Stack | CAR／SRAM 設定、Stack、PEI Core 定位 |
 | 每次停在不同早期位置 | SEC／PEI | Exception、Watchdog、Migration Log | Stack／記憶體損壞、未初始化資料、時序不穩 |
-| Memory Init 失敗 | PEI | Training Code、SPD、Memory Policy | DIMM 拓撲、供電、Clock、Policy、Silicon 版本 |
+| Memory Init 失敗 | PEI | Training Code、SPD、Memory Policy | DIMM 拓撲、供電、RefClk（Reference Clock）／Memory Clock、Policy、Silicon 版本 |
 | Memory Discovered 後重置 | PEI | Migration 前後 Log、HOB | Temporary RAM Migration、永久記憶體配置、指標 |
 | DXE Core 未進入 | PEI／DXE IPL | DXE IPL Log、FV/HOB | DXE FV、DXE Core FFS、解壓縮、驗證、載入位址 |
 | 某 DXE Driver 未執行 | DXE | Dispatcher Log、Depex | FV 掃描、Depex、Protocol、映像驗證 |
-| PCIe 裝置不存在 | DXE | Link、Bus Scan、BAR 配置 | Reset/Clock、Lane 設定、Enumeration、MMIO 資源 |
+| PCIe 裝置不存在 | DXE | Link、Bus Scan、BAR 配置 | Reset/RefClk（Reference Clock）、Lane 設定、Enumeration、MMIO 資源 |
 | Storage 可見但不可開機 | DXE／BDS | Block I/O、File System、Boot#### | Partition、Device Path、Loader 路徑、安全驗證 |
 | Boot Option 消失或順序改變 | BDS | Variable Store、BootOrder | Variable 寫入、Default Policy、裝置路徑穩定性 |
 | ExitBootServices 失敗 | OS Loader | Memory Map、MapKey、Event | GetMemoryMap 重試、晚期配置、Loader 問題 |
@@ -795,7 +818,7 @@ Pass／Fail 不應只以「有進 OS」判斷。建議同時確認：
 
 ### 2.9.4 根因隔離範例：BDS 回傳 EFI_NOT_FOUND 或沒有可用 Boot Option
 
-不要一開始就重建 `Boot####`。先以「物理層 → Controller／Protocol 層 → 分割區／檔案系統層 → Variable／Device Path 層 → Image Policy 層」建立排查棋盤。
+不要一開始就重建 `Boot####`。先使用「分層棋盤法（Layered Diagnostic Matrix）」：依「物理層 → Controller／Protocol 層 → 分割區／檔案系統層 → Variable／Device Path 層 → Image Policy 層」逐層建立證據。
 
 #### 第一道分叉：物理裝置是否成立
 
@@ -947,7 +970,9 @@ flowchart TD
 - Block I/O、Simple File System 與 Loader 路徑成立。
 - `LoadImage()`／`StartImage()` 與安全驗證結果符合 Policy。
 
-**Red 條件**：所有合法 Boot Option 均失敗，且 Recovery／Fallback 不可用。
+**救援路徑（Escape Hatch）**：若平台支援 UEFI Shell，BDS 判定為 Red 前可檢查內建 Shell、Recovery Volume、可移除媒體預設路徑或平台定義的強制進入 Shell 按鍵是否可用。進入 Shell 後，可使用 `map`、`dh`、`drivers`、`devices`、`bcfg` 等指令檢查檔案系統映射、Handle／Protocol、Driver Binding 與 Boot Option。Shell 能提供診斷能力，但不應繞過 Secure Boot、映像驗證或產品安全政策。若 Shell 可正常進入且核心 Protocol 完整，可將狀態由 Red 暫時調整為 Yellow，並保留正式 Boot Path 仍失敗的風險紀錄。
+
+**Red 條件**：所有合法 Boot Option、允許的 UEFI Shell 救援路徑與 Recovery／Fallback 均不可用，或安全政策不允許繼續。
 
 ### 2.11.7 OS Handoff Gate
 
