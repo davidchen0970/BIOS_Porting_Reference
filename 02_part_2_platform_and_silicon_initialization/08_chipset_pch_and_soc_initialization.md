@@ -7,9 +7,17 @@
 
 Rev3 進一步補強 Boot Mode 路徑分流、初始化後健康狀態、Policy 動態更新窗口、Silicon Package 相容性檢查，以及 Silicon Trace 與 BIOS Log 的時間軸整合。
 
+Rev4 明確定義 Silicon 軟體介面邊界，補充 ACPI BERT／WHEA／APEI 錯誤交接、動態 PCIe 資源預留、初始化路徑分流矩陣，以及 Lockdown 與 Protection 的層級差異。
+
 ## 8.1 文件目的
 
-Chipset、PCH 與 SoC 初始化是平台由 Reset 狀態進入可執行後續韌體、裝置列舉及作業系統啟動環境的關鍵程序。本章目的如下：
+Chipset、PCH 與 SoC 初始化是平台由 Reset 狀態進入可執行後續韌體、裝置列舉及作業系統啟動環境的關鍵程序。
+
+本章所稱的 **Silicon**，並非單指實體晶片或所有硬體暫存器，而是涵蓋 CPU／Silicon Vendor 提供的韌體元件、初始化程式庫或 Binary Package，例如 FSP、AGESA 或同類元件，以及其公開介面、Policy 結構、程式設計指南與適用 Errata。BIOS 通常負責收集平台資訊、建立並驗證 Policy、準備前置條件、呼叫供應商介面，以及保存初始化結果；Silicon Package 則依介面契約執行其負責的硬體初始化。
+
+因此，BIOS 與 Silicon 的互動原則上應透過供應商定義且與版本相容的軟體介面進行，不應將所有初始化工作理解為 BIOS 直接寫入暫存器。只有在供應商文件明確要求、介面未涵蓋，或平台整合責任確實屬於 BIOS 時，才應由平台程式直接設定對應暫存器，並記錄其版本、Stepping、時序與鎖定相依性。
+
+本章目的如下：
 
 - 說明 Chipset、PCH 與 SoC 初始化在 BIOS 啟動流程中的角色。
 - 釐清 Silicon、Board、Platform 與 BIOS 各層的責任邊界。
@@ -150,7 +158,22 @@ PolicyRevision=0x03 ResumeContext=Valid
 FullSiliconInit=Skip DmiRestore=Required ResourceReallocation=Skip
 ```
 
-文件與程式審查時，建議為每個初始化模組標示 `Run`、`Restore`、`Skip` 或 `Reinitialize`，並對 Cold Boot、Warm Reset、S3 Resume、Recovery 與 Update 後重啟建立路徑矩陣。
+文件與程式審查時，建議為每個初始化模組標示 `Run`、`Build`、`Restore`、`Skip`、`Conditional` 或 `Reinitialize`，並對 Cold Boot、Warm Reset、S3 Resume、Recovery 與 Update 後重啟建立路徑矩陣。
+
+下表為概念模板，實際模組名稱、動作與 Reset Domain 應依專案及 Silicon Vendor 流程調整。
+
+| 初始化模組 | Cold Boot | Warm Reset | S3 Resume | Update 後重啟 |
+|---|---|---|---|---|
+| Early Debug UART | Run | Run | Skip／Restore | Run |
+| Pre-Memory Silicon Policy | Build | Build／Reuse | Skip／Restore Context | Build／Migrate |
+| Memory Initialization | Run | Platform-defined | Restore／Skip Full Training | Run |
+| DMI／Fabric Link Training | Run | Run／Conditional | Restore／Light Retrain | Run |
+| PCIe Resource Allocation | Run | Run／Reuse | Skip | Run |
+| PCH Integrated Devices | Run | Reinitialize／Restore | Restore | Run |
+| Silicon Health Snapshot | Run | Run | Conditional | Run |
+| End-of-POST Protection | Run | Run | Conditional／Verify | Run／Reapply |
+
+Code Review 時，矩陣中的每一格應能對應至明確的 Boot Mode 判斷、函式入口、資料來源與測試項目。若同一模組在不同路徑採取不同動作，應同時記錄其狀態保存位置、失效條件及降級路徑。
 
 ## 8.5 PCH／SoC 初始狀態與初始化階段
 
@@ -402,6 +425,10 @@ IOMMU 用於限制 DMA 裝置可存取的記憶體範圍。BIOS 的主要責任�
 
 對支援大型 BAR、Above 4G Decoding、SR-IOV 或多層 PCIe Switch 的平台，應預留足夠資源並測試最大裝置組合。
 
+對支援 PCIe Hot Plug、Thunderbolt、USB4 Dock 或其他可在 OS 執行期間改變拓樸的連接埠，BIOS 應在啟動時為下游裝置預留額外的 Bus Number、MMIO、Prefetchable MMIO 及必要的 I/O Space。預留量應依平台允許的最大裝置數、PCIe Switch 層數、Bridge Window、BAR 尺寸、Resizable BAR 與 SR-IOV VF 需求規劃，不宜只依開機當下已連接的裝置計算。
+
+預留策略可由 Board ID、Port Capability、產品類型或受控 Setup 選項決定，但變更後通常需要重新啟動並重建 PCI 資源。ACPI 對 Hot Plug Port 所描述的資源範圍也應與實際保留量一致。驗證時至少應包含「開機時未連接外部裝置，進入 OS 後再熱插拔最大支援拓樸」以及「多層 Switch 加入大型 BAR／SR-IOV 裝置」等情境，並確認不發生 Bus Number 耗盡、Bridge Window 不足或資源重疊。
+
 ### 8.9.4 初始化後的 Silicon 健康狀態檢查
 
 主要初始化完成後、End-of-POST 鎖定與 OS 交接前，建議由單一模組聚合 Silicon 與高速 I/O 的健康狀態。目的不是將所有錯誤一律清除，而是先建立可追蹤的 POST 錯誤基線，再依嚴重度、所有權及規格決定保留、回報、清除或停止啟動。
@@ -437,6 +464,10 @@ ActionTaken, ClearResult, ErrataReference
 SiliconStepping, PackageVersion, BIOSBuildId
 ```
 
+健康狀態摘要除了供 BIOS 內部模組、BMC 或維修工具使用，也應規劃與平台的標準錯誤交接機制對接。對於 POST 階段已發生、但需要由 OS 得知的嚴重硬體錯誤，平台可依適用規格將記錄轉換為 ACPI BERT（Boot Error Record Table）所指向的 Boot Error Region，使 Windows WHEA 或 Linux APEI 等機制在接管後取得啟動階段錯誤。
+
+錯誤聚合器的內部結構不必直接等同 BERT 格式，但應保留可轉換所需的 Error Severity、Error Source、Section Type、FRU／裝置識別、時間資訊、原始狀態與處置結果。是否發布 BERT、哪些錯誤可進入 Boot Error Region，以及記錄的生命週期與清除時點，應依 ACPI 規格、OS 相容性、平台錯誤架構及隱私要求共同定義。一般 Debug Log 或可糾正的訓練暫態不應未經分類即寫入 BERT。
+
 #### 清除與 OS 交接邊界
 
 POST 階段的暫態錯誤若未清除，可能在 OS 接管後被視為新錯誤；但若未先保存證據就清除，也會失去板級訊號、Link Training 或 Silicon 問題的線索。因此應由平台定義每一類 Status Register 的擁有者、快照時間、清除時點及 OS 交接方式。已知 Errata 也應以明確的條件判斷處理，不宜使用「看到特定位元就忽略」的通用規則。
@@ -445,7 +476,11 @@ POST 階段的暫態錯誤若未清除，可能在 OS 接管後被視為新錯�
 
 ### 8.10.1 鎖定目標
 
-常見鎖定對象包括：
+本章所稱的 **Lockdown**，泛指將設定轉入最終受控狀態，使其不再接受非預期或未授權變更；它不必然等同單一 Write Once Lock Bit。實際機制可能包含 Write Once／Lockable 暫存器、權限層級切換，例如僅允許 SMM 或受信任執行環境修改、SPI Flash Protected Range／Block Protect、存取控制、介面隱藏，或在特定生命週期狀態下停用 Debug 能力。
+
+因此，文件應分別標示「設定鎖定」與「存取保護」：前者著重設定值在指定 Reset 前不可再變更；後者著重只有授權執行環境、身分或流程可修改。每一項機制的 Owner、可逆性、Reset 條件、更新例外與驗證方法，均應依 Silicon Vendor 規格及平台 Threat Model 定義。
+
+常見鎖定或保護對象包括：
 
 - BIOS Write Protection 與 SPI Descriptor 相關控制。
 - SMI、TCO Watchdog 與特定 SMM 控制。

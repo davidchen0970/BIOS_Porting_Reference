@@ -275,18 +275,21 @@ Training 結果可能以不同粒度保存：
 
 ### 9.3.3 常見 Training 項目
 
-| 項目 | 目的 | 常見失敗方向 |
-|---|---|---|
-| Write Leveling | 對齊 DRAM Clock 與 DQS 寫入時序 | CK／DQS 走線、Rank、DIMM Loading |
-| Read Gate／DQS Gate | 找到有效 Read DQS 接收窗口 | DQS、ODT、雜訊、錯誤 Rank |
-| Read Timing Centering | 將取樣點置於 Read Eye 中心 | SI、速度過高、Byte Lane Mapping |
-| Write Timing Centering | 將 Write DQ／DQS 置於穩定窗口 | DQ/DQS Mapping、Vref、ODT |
-| Read／Write Vref | 尋找可靠電壓取樣範圍 | 電源雜訊、DIMM 品質、Layout |
-| Command／Address Training | 對齊 CA／CS／CKE 等命令訊號 | CA Routing、DIMM Type、Register Clock Driver |
-| Round Trip Latency | 設定 Controller 至 DRAM 往返延遲 | Rank、Channel、Topology、速度 |
-| Receive Enable | 找到資料返回起點 | Read Path、DQS Gate、Controller |
+| 項目 | 目的 | 主要適用世代／條件 | 常見失敗方向 |
+|---|---|---|---|
+| Write Leveling | 對齊 DRAM Clock 與 DQS 寫入時序 | DDR4／DDR5 常見；實際流程依 Controller | CK／DQS 走線、Rank、DIMM Loading |
+| Read Gate／DQS Gate | 找到有效 Read DQS 接收窗口 | DDR4／DDR5 常見 | DQS、ODT、雜訊、錯誤 Rank |
+| Read Timing Centering | 將取樣點置於 Read Eye 中心 | DDR4／DDR5 常見 | SI、速度過高、Byte Lane Mapping |
+| Write Timing Centering | 將 Write DQ／DQS 置於穩定窗口 | DDR4／DDR5 常見 | DQ／DQS Mapping、Vref、ODT |
+| Read／Write Vref Training | 尋找可靠電壓取樣範圍 | DDR4／DDR5；Vref 類型與控制方式不同 | 電源雜訊、DIMM 品質、Layout |
+| Command／Address Training | 對齊 CA／CS／CKE 等命令訊號 | DDR4／DDR5；RDIMM／LRDIMM 流程通常更複雜 | CA Routing、DIMM Type、RCD 設定 |
+| ODT／Drive Strength Optimization | 選擇較合適的終端與驅動組合 | DDR4／DDR5，是否獨立呈現依 Silicon | Loading、DPC、DIMM 組合、Board Topology |
+| Round Trip Latency | 設定 Controller 至 DRAM 往返延遲 | DDR4／DDR5 常見 | Rank、Channel、Topology、速度 |
+| Receive Enable | 找到資料返回起點 | DDR4／DDR5 常見 | Read Path、DQS Gate、Controller |
+| CA Parity／CRC Path Verification | 驗證受支援命令、位址或資料保護路徑 | 依 DDR 世代、DIMM Type 與平台功能；DDR5／Server DIMM 較常見 | RCD、CA Routing、Parity Policy、錯誤注入殘留 |
+| On-die ECC／ECC Data Path Check | 確認 DRAM 內部或外部 ECC 相關狀態與資料路徑 | DDR5 On-die ECC 為 DRAM 內部能力；是否存在可見的獨立 Training Stage 依 Silicon 實作 | DRAM Device、外部 ECC Lane、Controller Policy、錯誤回報路徑 |
 
-表中名稱是共通概念。Silicon Log 可能使用不同縮寫，應建立專案自己的名稱對照表。
+表中名稱是共通概念，不代表每一個 DDR4／DDR5 平台都會以獨立階段呈現。尤其 DDR5 On-die ECC 通常由 DRAM 內部處理，不等同於系統層級 ECC，也不應假設所有 MRC 都有名為「DQ ECC Training」的固定階段。Silicon Log 可能使用不同縮寫，應依 Vendor 文件建立專案自己的名稱與世代對照表。
 
 ### 9.3.4 Training Window 與 Margin
 
@@ -357,6 +360,20 @@ Cache 不應只保存 Delay／Vref 數值，也應保存足以驗證適用性的
 | Payload Length | 邊界檢查 |
 | CRC／Hash | 檢查資料完整性 |
 | Success Marker | 確認前次 Training 已完整結束 |
+
+#### Cache 儲存位置
+
+Training Cache 的儲存位置會影響持久性、安全邊界、更新策略與可承受寫入次數：
+
+| 儲存位置 | 適用情境 | 優點 | 主要限制與檢查項目 |
+|---|---|---|---|
+| SPI Flash 專用區域 | 需要跨 AC Cycle 保存，且資料量較大 | 可由韌體自訂格式、A／B Copy 與更新流程 | 擦寫壽命、斷電一致性、Region 權限、Capsule Update 保留策略 |
+| UEFI Non-Volatile Variable | 資料量較小，需使用 Variable Service 管理 | 可沿用 Variable 屬性、配額與存取介面 | Variable Store 空間與 GC、Runtime 寫入權限、Authenticated Variable 是否適用 |
+| BMC／Management Controller 儲存區 | 伺服器平台需集中備份、版本管理或跨主機板流程 | 可由管理端保存多份資料並提供稽核 | Host／BMC 介面可用時序、身份綁定、完整性、版本同步與失聯回退 |
+| DRAM 保留區 | Warm Reset、S3 Resume 或 DRAM 電源持續的短期 Context | 讀寫快速，不消耗 Flash 擦寫次數 | AC Cycle 後失效；需避免被 OS、DMA 或 Memory Clear 覆寫 |
+| CMOS／小型持久儲存 | 只保存狀態旗標、Generation 或摘要 | 流程簡單 | 容量極小，不適合完整 Training Payload；電池與清除策略需確認 |
+
+選擇儲存位置時，至少應評估資料大小、寫入頻率、斷電保護、存取權限、Rollback／Downgrade、Firmware Update、Board／DIMM 身份綁定與復原方式。若 Payload 與 Metadata 分開保存，兩者必須具有共同的 Generation、Digest 或其他一致性識別，避免新舊資料交叉配對。
 
 ### 9.4.3 Cache 有效性判斷
 
@@ -545,6 +562,27 @@ Installed Capacity
 = OS Usable Capacity
 ```
 
+#### 容量落差診斷流程
+
+若 BIOS／MRC 顯示的安裝容量正確，但 OS 可用容量低於預期，建議依序比對：
+
+1. 確認 MRC／FSP 輸出的 `Installed Capacity`、啟用 Channel／Rank 與停用資源，先排除 Training 降級造成的容量減少。
+2. 加總 UEFI Memory Map 中可供一般 OS 使用的區域。通常可先觀察 `EfiConventionalMemory`，但 OS 最終可用容量仍會受 Loader、Kernel、ACPI 與 Runtime 保留影響，不宜只用單一 Type 當作最終結論。
+3. 依 Base、Length 與 Type 排序 Memory Map，找出異常偏大的 `EfiReservedMemoryType`、`EfiRuntimeServicesCode／Data`、`EfiACPIReclaimMemory`、`EfiACPIMemoryNVS` 或 MMIO Range。
+4. 檢查低位址 MMIO Hole、PCIe／CXL Window、TOLUD 類邊界與 Remap 設定，確認低於 4 GB 的 DRAM 是否已正確重映射到高位址，而不是直接遺失。
+5. 若啟用 Mirroring、Sparing、UMA 或其他 Hardware Reserved 功能，確認容量折減符合 Policy，且 `Installed`、`Protected`、`Reserved` 與 `Usable` 的定義在 BIOS、SMBIOS、BMC 與 OS 間一致。
+6. 檢查 SMBIOS Type 16／17／19／20 的容量與 Range 是否重疊或缺漏；`Maximum Capacity` 表示陣列能力上限，不應直接當作目前可用容量。
+7. 檢查 ACPI SRAT Memory Affinity 的 Base、Length、Enabled 與 Proximity Domain，確認沒有遺漏可用 Range，也沒有把 Reserved／Disabled Range 宣告為可用 NUMA Memory。
+8. 最後比對 OS 的 EFI Memory Map、`e820`、NUMA Node、Kernel Command Line 與 Crash Kernel／Huge Page 等保留設定，區分韌體保留與 OS 自行保留。
+
+建議保存一份依位址排序的 Range 對照表：
+
+```text
+Base | End | Length | MRC/HOB Type | UEFI Type | SRAT Node | OS Result | Owner
+```
+
+容量問題的重點是找出「從哪一個交接點開始出現差異」，而不是只比較 BIOS Setup 與 OS 顯示的兩個總數。
+
 ### 9.5.6 NUMA 與 Interleave
 
 多 Socket 或多 IMC 平台需定義：
@@ -660,16 +698,16 @@ Memory Mirroring 將相同資料寫入配對資源，提高容錯能力，但會
 
 不同 Reset 可能保留不同硬體狀態：
 
-| Path | DRAM 電源 | Controller Context | Cache 使用可能性 | 一般策略 |
-|---|---|---|---|---|
-| G3／AC Cycle | 遺失 | 遺失 | 通常需嚴格驗證 | Full Training 為主 |
-| S5 Cold Boot | 平台相關 | 多半重建 | 可依平台 | Full 或 Restore |
-| Warm Reset | 可能保留 | 部分保留 | 較高 | Restore 或簡化流程 |
-| S3 Resume | DRAM Self-Refresh | 必須保留關鍵 Context | 使用 Resume Context | 不可破壞既有內容 |
-| Watchdog Reset | 依 Reset Scope | 不確定 | 需看失敗原因 | 常要求保守策略 |
-| Capsule／Update Reset | 依平台 | 版本可能改變 | Cache 可能失效 | 依版本相容性判斷 |
+| Path | DRAM 電源／Context | Cache 使用可能性 | 建議決策邏輯 |
+|---|---|---|---|
+| G3／AC Cycle | DRAM 與 Controller Context 遺失 | 只有持久 Cache 可供驗證 | 不預設 `CacheValid = FALSE`；先依 9.4.3 驗證持久 Cache。若平台或 Silicon 不允許 G3 Restore、驗證失敗或電源條件要求重訓，執行 Full Training |
+| S5 Cold Boot | 依平台電源設計，多半需重建 Controller | 可依平台 | 驗證 Cache、Reset Cause 與 DIMM／Policy；有效且平台允許時 Restore，否則 Full Training |
+| Warm Reset | DRAM 與部分 Controller Context 可能保留 | 較高 | 優先使用符合本次 Reset Scope 的 Restore／Preserved Context；快速驗證失敗後切換 Full Training，並避免重複使用同一失效 Context |
+| S3 Resume | DRAM 維持 Self-Refresh，Resume Context 必須相符 | 必須使用受驗證的 Resume Context | 不可直接執行會破壞內容的 Full Training。Context 或 Self-Refresh 驗證失敗時，依平台與 OS 契約執行受控 Reset／Cold Boot，而不是在原 Resume Path 繼續 |
+| Watchdog Reset | 依 Watchdog Reset Scope，狀態可能不確定 | 需結合失敗階段判斷 | 若前次失敗位於 Memory Init／Restore，採保守 Full Training；若有可信 Reset Cause 與 Context，可依平台政策 Restore，但需記錄決策原因 |
+| Capsule／Update Reset | DRAM 狀態依更新流程；MRC／FSP 版本可能改變 | Cache 可能不相容 | 比對 Cache Format、MRC／FSP、Policy 與 Board／DIMM Identity；任一不相容即 Full Training，成功後產生新 Generation |
 
-表中為一般分類，實際電源域與 Reset Scope 需依 Platform Design 確認。
+表中為決策框架，不是所有 Silicon 都支援相同 Restore Path。尤其 G3／AC Cycle 後，DRAM Context 必然遺失，但持久化 Training Cache 不一定必須失效；是否可 Restore 應以 Silicon Vendor 規格與平台驗證結果為準。
 
 ### 9.7.2 Boot Mode 判斷
 
@@ -815,6 +853,27 @@ flowchart TD
     K -->|是| L[判定 Margin / Capability / Board 限制]
     K -->|否| M[最小配置交叉測試 / Vendor Escalation]
 ```
+
+#### 降速後通過的判讀方式
+
+降速或採用較保守 Policy 後能完成 Training，只能證明平台在較低壓力條件下可工作，不代表原問題已修復。可依下列方向繼續收斂：
+
+| 方向 | 證據與後續驗證 |
+|---|---|
+| SI／PI 裕度不足 | 比較高速與降速的 Timing／Vref Margin；檢查 Layout、ODT、Drive Strength、Rcomp、電源雜訊與溫度敏感度 |
+| DIMM 個體或批次裕度不足 | 將同一 DIMM 換到已知良好 Board／Slot，並以同 Part Number 的多支樣品交叉測試；依 QVL 規則判定 Fail、Conditional Pass 或降級使用 |
+| Board Topology 限制 | 比較 1DPC／2DPC、近端／遠端 Slot、不同 Board Revision 與已知良好板；確認宣告速度是否高於實際 Layout 能力 |
+| Policy 過度樂觀 | 檢查 CPU SKU、Stepping、DIMM Type、Rank、DPC、Board Revision 與 Vendor 限制表；修正 Auto Speed、ODT 或 Guard Band Policy |
+| Mapping／Population 問題 | 確認降速是否只是掩蓋 DQ／DQS／CA Mapping、錯誤 Rank 宣告或不支援混插；仍需回到 Topology 與 SPD 證據確認 |
+
+建議收斂順序：
+
+1. 保存原速度與降速後的完整 Training／Margin 差異。
+2. 固定較低速度建立穩定基準，但不要立即作為正式修正。
+3. 交換 DIMM、Slot、Board 與 CPU，判斷問題隨哪個元件移動。
+4. 比較 1DPC／2DPC、溫度與電壓邊界。
+5. 依證據調整 Layout、QVL、速度表或 Policy。
+6. 回到原目標速度重新執行完整回歸；若產品決定降級規格，需同步更新規格、Setup、SMBIOS／管理資訊與測試門檻。
 
 ### 9.8.7 交叉替換方法
 
@@ -1003,6 +1062,7 @@ Memory 問題建議依序收斂：
 ## 9.11 本章重點
 
 - DRAM 初始化的輸入不只來自 SPD，也包含 Board Topology、Silicon 能力、產品 Policy、Reset Path 與 Cached Training Data。
+- Training 名稱與階段會隨 DDR 世代、DIMM Type 與 Silicon 改變；DDR5 On-die ECC 不等同系統層級 ECC，也不必然對應獨立的韌體 Training 階段。
 - MRC／FSP-M 負責 Silicon 細節，平台負責提供正確的拓樸、電氣參數、設定與錯誤政策。
 - JEDEC 初始化讓 DRAM 進入工作狀態；Training 則尋找可靠的時序與電壓窗口。
 - Training 成功不代表 Margin 足夠，量產仍需涵蓋 Population、溫度、電壓與 DIMM QVL。

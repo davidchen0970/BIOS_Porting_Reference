@@ -28,15 +28,15 @@
 ## 快速導覽
 
 - [10.1 系統觀念與責任邊界](#101-系統觀念與責任邊界)：先建立 Power、Clock、Reset 的相依模型。
-- [10.2 Clock 架構](#102-clock-generatorbclkreference-clock-與-pll-初始化)：確認 clock 的來源、分配、穩定與啟用時機。
-- [10.3 Reset Domain](#103-reset-domain-與關鍵-reset-訊號)：區分 reset 的來源、範圍與解除條件。
+- [10.2 Clock 架構](#102-clock-generatorbclkreference-clock-與-pll-初始化)：確認 clock 來源、設定時機、PCIe 模式與穩定條件。
+- [10.3 Reset Domain](#103-reset-domain-與關鍵-reset-訊號)：區分 reset 的來源、方向、範圍與解除條件。
 - [10.4 Power Rail 與狀態轉換](#104-power-railpower-goodslp_sx-與電源狀態轉換)：由 rail 與 handshake 理解 power sequence。
 - [10.5 Power State Machine](#105-pchsoC-power-state-machine-與韌體介入點)：定位 BIOS、EC、BMC、CPLD 與 silicon 的控制邊界。
 - [10.6 Boot／Reset 類型](#106-cold-bootwarm-resetglobal-reset-與-ac-cycle)：選擇正確測試與復現方式。
-- [10.7 故障偵測與 Timeout](#107-clockpowerreset-故障偵測與-timeout-policy)：避免無限等待與隱藏失敗。
-- [10.8 量測與驗證](#108-示波器邏輯分析儀gpio-與暫存器驗證)：建立可重複且可判定的量測方法。
-- [10.9 Bring-up 流程](#109-clockpowerreset-bring-up-系統化流程)：按風險與相依順序逐步導入。
-- [10.10 常見問題](#1010-常見問題與排查)：依症狀選擇觀測點。
+- [10.7 量測與驗證](#107-示波器邏輯分析儀gpio-與暫存器驗證)：先取得波形、timestamp 與命名對照證據。
+- [10.8 故障偵測與 Timeout](#108-clockpowerreset-故障偵測與-timeout-policy)：依規格與量測資料制定 timeout、retry 與 fallback。
+- [10.9 常見問題](#109-常見問題與排查)：由症狀反查 Standby、Rail、Clock、Reset 與 Firmware。
+- [10.10 Bring-up 流程](#1010-clockpowerreset-bring-up-系統化流程)：按風險與相依順序逐步導入。
 - [10.11 測試矩陣](#1011-驗證與測試矩陣)：覆蓋 reset、電源、SKU、溫度與錯誤注入。
 
 ## 建議系統地圖
@@ -140,6 +140,26 @@ flowchart TD
 
 並非所有 clock 都由 BIOS 設定。若 clock generator 必須在 CPU 執行前提供 BCLK，profile 可能由 pin strap、外部 EEPROM、CPLD 或固定硬體決定；BIOS 的角色可能只剩讀回、驗證或設定較晚啟用的輸出。
 
+#### Clock Generator 設定時機的相依性檢查
+
+Clock generator 的設定路徑必須先解開「控制介面本身是否依賴待設定 clock」的循環相依：
+
+1. **CPU 執行前必須存在的 clock：** 例如 CPU／SoC 啟動所需的 BCLK，不可依賴尚未執行的 BIOS 透過 I2C／SMBus 設定。這類設定必須由 strap、clock generator EEPROM、CPLD、EC 或固定硬體 profile 完成。
+2. **PEI 階段可調整的 clock：** 若 SMBus／I2C controller 所需的 rail、source clock、pad mux 與 reset 已就緒，BIOS 才可在 PEI 設定較晚使用的 output、SSC profile 或 clock gating。
+3. **DXE 階段才需要的 clock：** 非開機關鍵裝置可在其 Power Rail、request signal 與 controller protocol 就緒後設定，但仍須在解除該裝置 reset 前完成。
+4. **存取前檢查：** 確認 controller power domain、controller clock、bus pin mux、level shifter、target address、bus ownership 與 timeout。若其中任一條件依賴目標 clock output，就必須改由 pre-boot profile 解決。
+
+```mermaid
+flowchart TD
+    A[此 Clock 是否為 CPU／控制匯流排啟動前置條件?] -->|是| B[使用 Strap／EEPROM／CPLD／固定 Profile]
+    A -->|否| C{SMBus／I2C Controller 已有 Power、Clock、Reset?}
+    C -->|否| D[延後設定或改用 Pre-boot Profile]
+    C -->|是| E[確認 Pad Mux、Address、Ownership]
+    E --> F[PEI／DXE 寫入設定並讀回驗證]
+    F --> G[等待 Clock Stable／PLL Lock]
+    G --> H[解除 Consumer Reset]
+```
+
 ### 10.2.4 PLL 與 Lock
 
 - PLL Lock bit 只代表特定 PLL 的內部狀態，不一定能證明板端輸出波形符合規格。
@@ -154,7 +174,16 @@ flowchart TD
 - **SRNS：** 不同 source，且不使用相同 SSC profile。
 - **SRIS：** 獨立 source，兩端可各自使用 SSC，需由元件與平台共同支援。
 
-選擇模式時需同步確認 BIOS policy、retimer、endpoint capability、clock generator profile 與 board topology。僅修改 PCIe port register 而未修改實際 clock 架構，可能造成 link training 不穩定。
+選擇模式時需同步確認 BIOS policy、retimer、endpoint capability、clock generator profile 與 board topology。決定權通常首先來自 board design 與所有元件的 capability；Firmware 的責任是讓 FSP／AGESA／Silicon Init policy 與實際 wiring 一致。僅修改 PCIe port register 而未修改實際 clock 架構，可能造成 link training 不穩定。
+
+| 條件 | 建議模式 | 主要風險與檢查 |
+|---|---|---|
+| Root Complex、retimer 與所有 endpoint 共用同一 clock source／buffer | Common Clock | 架構較直接，但 clock tree 單點故障可能影響整個 topology；確認 CLKREQ# 與 SSC 一致 |
+| Endpoint 位於獨立 clock tree，且所有元件明確支援 SRIS | SRIS | 任一 endpoint／retimer 不支援即可能 Link Training 失敗；需逐 port 核對 capability |
+| 兩端使用獨立 source，且不採共同 SSC | SRNS | 需確認元件的 frequency tolerance 與 silicon policy 支援 |
+| 同一平台混合多種 topology | 依每個 port 的 wiring 與 capability 個別設定 | 不可使用單一全域模式；需建立 Port-to-Clock-Mode 對照表並逐埠驗證 |
+
+決策順序建議為：先確認 schematic clock tree，再核對 endpoint／retimer datasheet，接著設定 clock generator，最後才設定 Silicon Init 的 port mode。若四者無法形成一致證據，應視為設計待確認，而不是以反覆嘗試 policy 值決定。
 
 ### 10.2.6 Clock 設定表範本
 
@@ -184,13 +213,17 @@ flowchart TD
 
 | 訊號 | 概念用途 | 驗證重點 |
 |---|---|---|
-| RSMRST# | Resume well／低功耗域 ready 後解除相關 reset | standby rail、RTC／resume clock、解除時間 |
-| PLTRST# | 平台與多數下游裝置的 reset | 與 PWROK、clock stable、PERST# 的相對時間 |
-| SYS_RST# | 系統層級 reset request／distribution | 來源、debounce、pulse width、domain coverage |
-| PERST# | PCIe endpoint／slot reset | reference clock、power stable、規格要求的 delay |
-| PWROK／Power Good | 表示一組 rail 達到允許範圍 | aggregation 邏輯、glitch filter、deassert path |
+| RSMRST# | PCH 架構中常用於 resume well reset；解除後 PCH 才能進一步處理部分 sleep／wake 與 power button 流程 | standby rail、RTC／resume clock、解除時間；SoC 平台可能沒有此訊號或使用內部狀態機取代 |
+| PLTRST# | 通常由 PCH／SoC 輸出，用於 PCIe、SATA、USB、LPC／eSPI、GPIO 等平台周邊 | 與 Power Good、clock stable、PERST# 的相對時間；不等於 CPU 本身的 CPURST# |
+| SYS_RST# Input | 進入 PCH／SoC／CPLD 的系統 reset request，例如 front-panel button 或外部 supervisor | 方向、極性、debounce、最小 pulse width、是否同步化 |
+| SYS_RST# Output／Distribution | 由 PCH／SoC／CPLD 產生或轉送至其他 domain 的 reset | source、fan-out、domain coverage、level shift；名稱不代表固定方向 |
+| PERST# | PCIe endpoint／slot reset | reference clock、power stable、規格要求的 delay；retimer／switch 可能另有獨立 reset |
+| PSU_PWROK | PSU 宣告其輸出群組進入允許範圍 | PSU 規格、電壓準位、assert／deassert 條件 |
+| VR_PWROK | CPU／memory／SoC VR 或 PMIC 的 Power Good | 對應 rail、fault latch、ramp 與 load transient |
+| PCH_PWROK | PCH／SoC 所見或內部使用的 power-ok 條件 | silicon 定義、輸入來源、內部 gating |
+| SYS_PWROK | CPLD／EC／離散邏輯彙整多個 Power Good 後的系統條件 | aggregation、glitch filter、延遲、任一輸入掉落時的行為 |
 
-名稱與極性必須以平台文件為準。相同名稱在不同平台的來源或涵蓋範圍也可能不同。
+名稱與極性必須以平台文件為準。`RSMRST#` 的定義與涵蓋範圍依平台而異，SoC 平台可能使用不同名稱或內部狀態機取代。`PLTRST#` 也不保證涵蓋 BMC、retimer、PCIe switch 或所有板端裝置；這些元件可能使用獨立 reset。對 `SYS_RST#` 必須查閱 datasheet 與 schematic，確認它在該元件上是輸入、輸出還是經 CPLD 轉送的雙向命名。
 
 ### 10.3.3 Reset Source 與 Cause
 
@@ -387,11 +420,154 @@ G3／Mechanical Off
 - Warm Reset 正常、Cold Boot 失敗：優先查 rail、clock、strap、pre-memory GPIO 與 memory init。
 - Cold Boot 正常、Warm Reset 失敗：優先查殘留裝置狀態、reset coverage、bus master、SMM／watchdog。
 - Power Cycle 無法復原、AC Cycle 可復原：可能有 standby domain、CPLD／EC latch、VR fault 未清除。
-- 第一次 AC 插入失敗、第二次成功：可能是起振、ramp、EEPROM profile 載入、debounce 或 timeout margin。
+- 第一次 AC 插入失敗、第二次成功：可能是起振、ramp、EEPROM profile 載入、debounce 或 timeout margin。第一次 AC 插入時，standby rail 從零開始建立，crystal／clock generator 的啟振、EC／BMC／CPLD 從 SPI Flash 載入 firmware，以及 PMIC／CPLD fault latch 的初始收斂，都可能比後續 reset 或主電源重啟更久。第二次啟動時，部分 standby domain、oscillator、cache 或 controller state 尚未完全消失，因此表面上看似恢復正常。
 
-## 10.7 Clock／Power／Reset 故障偵測與 Timeout Policy
+針對此類問題，不應只增加固定 delay。應分別量測 standby rail、controller reset release、controller firmware-ready、clock stable 與 main-rail enable 的第一次及後續 AC 插入時間，並以規格最大值、實測分佈及溫度／輸入電壓 margin 決定 timeout。若允許 retry，需確認 retry 前已清除 fault latch，且 retry 不會違反 rail 或 reset 規格。
 
-### 10.7.1 為何必須有 Timeout
+## 10.7 示波器、邏輯分析儀、GPIO 與暫存器驗證
+
+### 10.7.1 工具選擇
+
+| 工具 | 適合觀測 | 不足之處 |
+|---|---|---|
+| 示波器 | rail ramp、overshoot、jitter 概觀、reset／PG 相對時間 | 多通道數位解碼有限，探棒可能影響訊號 |
+| 邏輯分析儀 | 多個低速數位訊號、I2C／SMBus、狀態機順序 | 不能準確量測類比 rail 與高速 clock signal integrity |
+| Differential／Active Probe | 高速／小振幅 clock、差動訊號 | 使用與接地方式要求高 |
+| POST Card／GPIO Checkpoint | Firmware 執行階段 | CPU 未執行前無訊息，checkpoint 本身也可能受阻 |
+| Serial Log | Policy、register、timeout、phase | 無法證明板端電氣波形 |
+| Register Dump | Reset cause、PLL／PG／state status | 可能為 latched／read-to-clear，且需理解取樣時機 |
+| BMC／CPLD／PMBus Log | Power state、VR fault、telemetry | 時間戳需與 BIOS／scope 對齊 |
+
+### 10.7.2 基本儀器設定指引
+
+以下為建立初始量測條件的起點，不是取代 signal／component datasheet 的固定答案：
+
+#### Power Rail
+
+- 優先使用短 ground spring、同軸焊接點或 differential probe，避免使用過長的被動探棒接地線；長接地回路容易產生假的 ringing 與 ripple。
+- 一般低壓 rail 可先使用高輸入阻抗探棒，並確認探棒額定電壓、衰減比與示波器 channel 設定一致。量測高速 transient 或小 ripple 時，需依板端測點與儀器規格評估 50 Ω／AC coupling／bandwidth limit，不能直接把 50 Ω 輸入接到未知驅動能力的電源節點。
+- 先以較長時間尺度觀察完整 sequence，例如從 `100 ms/div` 或能覆蓋整次 power-on 的範圍開始，再使用 zoom 或第二次 capture 檢查 ramp、overshoot 與 Power Good 邊緣。
+- Ripple 量測可先啟用適當 bandwidth limit 以降低高頻雜訊，但 Pass／Fail 使用的 bandwidth 必須符合 rail／VR 規格。
+
+#### Clock Signal
+
+- 一般 10 MΩ／1 MΩ passive probe 的輸入電容可能明顯負載高速或小振幅 clock。BCLK、PCIe reference clock 與差動 clock 應優先使用額定頻寬足夠、輸入電容低的 active／differential probe，並在指定 test point 量測。
+- 50 Ω termination 只應在 signal source、test fixture 與量測方法明確要求時使用。不可因為示波器提供 50 Ω 模式就直接套用到 crystal pin、差動 clock pin或弱驅動輸出。
+- Clock 是否存在可先做頻率與 amplitude 概觀；jitter、eye／phase noise 或 SSC 合規判定則需要符合規格的探棒、fixture、bandwidth 與分析方法。
+
+#### Reset／Power Good
+
+- 上升或解除事件使用 rising-edge trigger，下降、fault 或 reset assertion 使用 falling-edge trigger；active-low 訊號需先確認「電氣邊緣」與「邏輯事件」的對應。
+- 初始 trigger level 可設在該數位訊號有效高電位的大約 50%，再依 input threshold 規格調整。Power Rail 的有效判定不可只套用任意 70% 閾值，應以 Power Good threshold、silicon VIH／VIL 或 VR 規格為準。
+- 使用 normal／single sequence 擷取單次開機；間歇性問題可使用 segmented memory、sequence mode 或 persistence，並以共同 trigger 比較成功與失敗。
+- 開始量測前先確認 channel deskew、probe compensation、衰減比、offset、sample rate 與 record length，避免長時間窗造成有效取樣率不足。
+
+> **安全提醒：** 儀器接地、差動探棒 common-mode、浮接系統及市電側量測具有風險。若量測點涉及非隔離 AC、hot-swap 前端或超出一般探棒額定範圍，應由受過訓練的人員使用核准設備與隔離方法執行。
+
+### 10.7.3 量測計畫
+
+每次量測至少記錄：
+
+- Board ID、Fab Revision、SKU、CPU／SoC stepping。
+- BIOS、EC、BMC、CPLD、PMIC／VR firmware 版本。
+- 測點名稱、schematic page、實體位置。
+- Probe 型號、bandwidth、attenuation、接地方式。
+- Trigger source、threshold、time scale、sample rate。
+- AC／DC coupling 與 bandwidth limit。
+- 測試溫度、輸入電壓、負載及 reset 類型。
+- 規格來源、預期範圍及 Pass／Fail。
+
+### 10.7.4 建議通道配置
+
+四通道示波器可先使用：
+
+1. Standby／Main Power Good。
+2. 目標 Rail。
+3. 必要 Reference Clock 或 Clock Enable。
+4. RSMRST#／PLTRST#／PERST# 中與問題最相關者。
+
+若通道不足，應分次量測並保留共同 trigger／reference channel，否則不同 capture 的時間無法可靠對齊。
+
+### 10.7.5 GPIO／POST Checkpoint
+
+```c
+DEBUG ((DEBUG_INFO, "SEQ: BeforeClockInit\n"));
+PlatformCheckpoint (CHECKPOINT_BEFORE_CLOCK_INIT);
+
+Status = InitializePlatformClock ();
+
+PlatformCheckpoint (CHECKPOINT_AFTER_CLOCK_INIT);
+DEBUG ((DEBUG_INFO, "SEQ: ClockInit Status=%r\n", Status));
+```
+
+Checkpoint 應具備：
+
+- 唯一編號與 boot phase。
+- 對照表與版本。
+- 不會改變關鍵 strap／reset／power GPIO 的安全保證。
+- 在 Release Build 中的保留或移除政策。
+- 與示波器 trigger 對齊的方法。
+
+### 10.7.6 Register 取樣順序
+
+1. 先讀可能 read-to-clear 的 register 並保存 raw value。
+2. 讀 reset／wake／power failure cause。
+3. 讀 rail／clock／PLL／reset status。
+4. 讀 firmware policy 與實際 hardware state。
+5. 需要時才清除 status，並記錄清除值。
+
+只保存解碼後文字可能遺失未知 bit。建議 raw value 與 decoded result 同時保留。
+
+#### Net-to-Code 交叉驗證
+
+Bring-up 前應由硬體與韌體人員共同建立一份可版本控制的對照表，不以名稱相似度推測：
+
+| Schematic Net | 方向／極性 | SoC Pad／Ball | BIOS Symbol／GPIO ID | CPLD／EC 名稱 | 電壓域 | Test Point | 備註 |
+|---|---|---|---|---|---|---|---|
+| PCH_PLTRST# | Output／Low Active | 待填 | PLT_RST_N | 待填 | 待填 | TPxxx | 範例，需依專案替換 |
+
+交叉驗證流程：
+
+1. 從 schematic net 追到 source、level shifter、buffer、connector 與 consumer。
+2. 以 silicon datasheet／GPIO mapping 確認 pad、community、group、pad number 與 native／GPIO mode，不自行假設編號偏移。
+3. 在 GPIO table、ACPI ASL、Board library、CPLD／EC source 中搜尋 net alias，記錄實際 symbol。
+4. 對 I2C／SMBus address 同時記錄 7-bit address 與 datasheet／schematic 的表示法。若文件列的是包含 R/W bit 的 8-bit 值，必須明確轉換並標註，不可只寫十六進位數字。
+5. 由硬體與韌體 owner 共同審查，再以實際 register dump、bus scan 或示波器／邏輯分析儀確認。
+
+#### 時間軸對齊方法
+
+跨 BIOS、BMC、CPLD 與示波器分析時，應建立共同事件標記：
+
+- BIOS Serial Log 輸出單調遞增 timestamp，並在 Power Good 讀取、Clock Init、Reset Release 前後輸出 checkpoint。
+- 將一個不影響功能的 debug GPIO 接至示波器或邏輯分析儀，在關鍵程式點 toggle／pulse，使軟體事件直接出現在電氣波形上。
+- BMC／CPLD log 優先使用同一 RTC／time source；若無法共用，開機後執行 periodic sync，或記錄各控制器的 boot-relative elapsed time。
+- 每份 capture 保存 trigger event、pre-trigger 長度與 boot count，並讓 BIOS fault record、BMC event 與 scope 檔案使用相同 case ID。
+- 無法精確同步時，不得以不同裝置的絕對時間戳直接推論先後；至少建立「距 AC insertion／Power Button／GPIO marker 的經過時間」。
+
+```c
+UINT64 StartUs;
+
+StartUs = GetPerformanceCounter ();
+DEBUG ((DEBUG_INFO, "T+%Lu us: Before PLTRST# release
+", GetElapsedUs (StartUs)));
+PlatformCheckpoint (CHECKPOINT_BEFORE_PLTRST_RELEASE);
+ToggleDebugGpio ();
+```
+
+### 10.7.7 波形判讀提醒
+
+- 數位 threshold crossing 不代表 rail 已滿足穩態與 ripple 規格。
+- Power Good 邊緣正常，不代表 Power Good 前的 rail ramp 正常。
+- Clock 有頻率，不代表 amplitude、common-mode、jitter 或 SSC 正確。
+- Reset pulse 看得到，不代表所有下游裝置都收到相同 pulse width。
+- 探棒接地線過長可能產生假 ringing；需先排除量測方法造成的現象。
+
+## 10.8 Clock／Power／Reset 故障偵測與 Timeout Policy
+
+Timeout 數值必須建立在 silicon／component 規格、正常與邊界條件的實際量測分佈，以及溫度、輸入電壓、負載與 Board Variation 的 margin 上。不得先任意選一個延遲，再以「多數情況可開機」作為依據。前一節的波形與 timestamp 應形成 timeout 的可追蹤證據。
+
+
+### 10.8.1 為何必須有 Timeout
 
 無限等待會讓系統停在無法判讀的狀態，也可能讓 watchdog、BMC 或 service processor 將問題誤判成一般 hang。每一個 firmware-controlled poll 都應定義：
 
@@ -403,7 +579,7 @@ G3／Mechanical Off
 - retry 前需重設哪些 domain。
 - 最終行為是降級、reset、shutdown 還是停機。
 
-### 10.7.2 Timeout 表範本
+### 10.8.2 Timeout 表範本
 
 | 等待項目 | Owner | Poll／Delay | Timeout | Retry | 失敗行為 | 保存證據 |
 |---|---|---:|---:|---:|---|---|
@@ -412,7 +588,7 @@ G3／Mechanical Off
 | PCIe Link | BIOS | 待填 | 待填 | 待填 | Disable port／繼續 | LTSSM、speed、width |
 | Reset Release Ack | BIOS／CPLD | 待填 | 待填 | 待填 | Stop／reset | Cause、GPIO、CPLD state |
 
-### 10.7.3 Red／Yellow／Green 策略
+### 10.8.3 Red／Yellow／Green 策略
 
 - **Red，停止或安全關機：** rail 超規、VR fault、必要 BCLK 缺失、關鍵 reset 不定、可能傷害硬體的未知狀態。
 - **Yellow，受限降級：** 非必要 PCIe slot clock failure、可停用的周邊、失去冗餘但仍可安全啟動。
@@ -420,7 +596,7 @@ G3／Mechanical Off
 
 Yellow path 必須明確停用受影響功能並留下事件，不可只忽略錯誤繼續啟動。
 
-### 10.7.4 Retry 原則
+### 10.8.4 Retry 原則
 
 - Retry 前必須知道第一次失敗留下哪些 state。
 - 若 retry 沒有重設真正的 fault domain，只是再次 poll，通常無助於復原。
@@ -428,7 +604,7 @@ Yellow path 必須明確停用受影響功能並留下事件，不可只忽略�
 - 每次 retry 都應記錄 cause、elapsed time 與結果。
 - 量產版不應用大量 retry 掩蓋 margin 問題。
 
-### 10.7.5 Fault Record
+### 10.8.5 Fault Record
 
 ```c
 typedef struct {
@@ -449,85 +625,84 @@ typedef struct {
 
 若保存於 variable、CMOS、BMC SEL、CPLD scratch register 或其他持久區域，需考慮寫入壽命、原子性、版本、CRC、敏感資料與失敗復原。
 
-## 10.8 示波器、邏輯分析儀、GPIO 與暫存器驗證
+## 10.9 常見問題與排查
 
-### 10.8.1 工具選擇
+### 10.9.1 完全無反應
 
-| 工具 | 適合觀測 | 不足之處 |
+| 首要觀測 | 可能方向 | 下一步 |
 |---|---|---|
-| 示波器 | rail ramp、overshoot、jitter 概觀、reset／PG 相對時間 | 多通道數位解碼有限，探棒可能影響訊號 |
-| 邏輯分析儀 | 多個低速數位訊號、I2C／SMBus、狀態機順序 | 不能準確量測類比 rail 與高速 clock signal integrity |
-| Differential／Active Probe | 高速／小振幅 clock、差動訊號 | 使用與接地方式要求高 |
-| POST Card／GPIO Checkpoint | Firmware 執行階段 | CPU 未執行前無訊息，checkpoint 本身也可能受阻 |
-| Serial Log | Policy、register、timeout、phase | 無法證明板端電氣波形 |
-| Register Dump | Reset cause、PLL／PG／state status | 可能為 latched／read-to-clear，且需理解取樣時機 |
-| BMC／CPLD／PMBus Log | Power state、VR fault、telemetry | 時間戳需與 BIOS／scope 對齊 |
+| AC input／Standby Rail | PSU、fuse、hot-swap、standby VR | 量測輸入與 Standby PG |
+| EC／BMC／CPLD reset | 控制器未啟動 | 確認 clock、boot flash、reset |
+| Power button／wake | 輸入極性、debounce、狀態機 | 邏輯分析儀與 controller log |
+| Main rail enable | sequence 未開始或被 fault 阻止 | 查 fault latch、state register |
 
-### 10.8.2 量測計畫
+### 10.9.2 有上電但無 POST
 
-每次量測至少記錄：
+| 首要觀測 | 可能方向 | 下一步 |
+|---|---|---|
+| Main Power Good | Rail 未穩或 aggregate PG 未成立 | 同步量測 rail 與 PG |
+| BCLK／必要 clock | Clock generator profile／enable／起振 | Scope＋clock status |
+| RSMRST#／PLTRST# | 前置條件不足、reset gating | 對齊 clock／PG／reset 波形 |
+| SPI activity | CPU 未離開 reset或 Boot Flash 路徑 | Probe CS#／CLK／data、檢查 strap |
+| POST／GPIO checkpoint | 停在 SEC／PEI | 對照 checkpoint 版本與 serial log |
 
-- Board ID、Fab Revision、SKU、CPU／SoC stepping。
-- BIOS、EC、BMC、CPLD、PMIC／VR firmware 版本。
-- 測點名稱、schematic page、實體位置。
-- Probe 型號、bandwidth、attenuation、接地方式。
-- Trigger source、threshold、time scale、sample rate。
-- AC／DC coupling 與 bandwidth limit。
-- 測試溫度、輸入電壓、負載及 reset 類型。
-- 規格來源、預期範圍及 Pass／Fail。
+### 10.9.3 偶發 Cold Boot 失敗
 
-### 10.8.3 建議通道配置
+- Rail ramp、Power Good glitch 或 discharge 不一致。
+- Crystal／PLL 在低溫或特定 AC off time 下起振較慢。
+- Board ID／strap sampling 靠近臨界時間。
+- EEPROM／CPLD profile 尚未 ready。
+- Timeout 太貼近典型值，未涵蓋規格最大值。
+- 記憶體 training、VR transient 或負載組合造成 margin 問題。
 
-四通道示波器可先使用：
+排查時應用示波器的 segmented memory、persistence 或 sequence mode 擷取多次開機，不能只比較單次成功與單次失敗。
 
-1. Standby／Main Power Good。
-2. 目標 Rail。
-3. 必要 Reference Clock 或 Clock Enable。
-4. RSMRST#／PLTRST#／PERST# 中與問題最相關者。
+### 10.9.4 Warm Reset 失敗
 
-若通道不足，應分次量測並保留共同 trigger／reference channel，否則不同 capture 的時間無法可靠對齊。
+- Reset domain 不足，device／retimer／controller 保留舊狀態。
+- Bus master／DMA 未停止。
+- Clock gating／CLKREQ# 狀態與下一次初始化假設不一致。
+- Watchdog 或 reset cause 讀取／清除順序錯誤。
+- SMM／BMC／CPLD 同時觸發不同 reset。
 
-### 10.8.4 GPIO／POST Checkpoint
+### 10.9.5 AC Cycle 才能復原
 
-```c
-DEBUG ((DEBUG_INFO, "SEQ: BeforeClockInit\n"));
-PlatformCheckpoint (CHECKPOINT_BEFORE_CLOCK_INIT);
+- Standby powered latch 未被 Power Cycle 清除。
+- CPLD／EC／BMC state machine 卡在 fault state。
+- VR／PMIC fault 需要移除輸入電源。
+- RTC／resume domain register 未被一般 reset 清除。
+- 裝置 AUX power 保留狀態。
 
-Status = InitializePlatformClock ();
+### 10.9.6 PCIe Link 不穩
 
-PlatformCheckpoint (CHECKPOINT_AFTER_CLOCK_INIT);
-DEBUG ((DEBUG_INFO, "SEQ: ClockInit Status=%r\n", Status));
-```
+- Reference clock mode 與 endpoint／retimer policy 不一致。
+- PERST# 與 reference clock／power 的相對時間不符。
+- CLKREQ# wiring、pull-up 或 clock buffer gating 錯誤。
+- Retimer firmware／reset／power／clock sequence 不完整。
+- Bifurcation、lane reversal、link speed policy 與 board wiring 不一致。
 
-Checkpoint 應具備：
+### 10.9.7 Sleep／Wake 失敗
 
-- 唯一編號與 boot phase。
-- 對照表與版本。
-- 不會改變關鍵 strap／reset／power GPIO 的安全保證。
-- 在 Release Build 中的保留或移除政策。
-- 與示波器 trigger 對齊的方法。
+- SLP_Sx# 對 rail 的 mapping 錯誤。
+- Wake source 沒有供電或被 reset。
+- ACPI table 宣告與硬體 wiring 不一致。
+- EC／BMC／CPLD 未辨識 state transition。
+- Resume clock、RSMRST# 或 context restore 順序錯誤。
 
-### 10.8.5 Register 取樣順序
+### 10.9.8 通用排查流程
 
-1. 先讀可能 read-to-clear 的 register 並保存 raw value。
-2. 讀 reset／wake／power failure cause。
-3. 讀 rail／clock／PLL／reset status。
-4. 讀 firmware policy 與實際 hardware state。
-5. 需要時才清除 status，並記錄清除值。
+1. 固定可重現條件與版本。
+2. 判定 CPU 是否曾開始執行。
+3. 由 Standby Rail 往 Main Rail、Clock、Reset、SPI／POST 逐層量測。
+4. 保存 reset／power／fault raw status，避免先清除。
+5. 對齊 scope、CPLD／BMC log、POST code 與 BIOS serial log 的時間軸。
+6. 與參考板或最近可用版本做單一變因比較。
+7. 修正後覆蓋 Cold／Warm／Global／Power／AC Cycle。
+8. 將 workaround、量測證據與回歸結果關聯到同一 issue。
 
-只保存解碼後文字可能遺失未知 bit。建議 raw value 與 decoded result 同時保留。
+## 10.10 Clock／Power／Reset Bring-up 系統化流程
 
-### 10.8.6 波形判讀提醒
-
-- 數位 threshold crossing 不代表 rail 已滿足穩態與 ripple 規格。
-- Power Good 邊緣正常，不代表 Power Good 前的 rail ramp 正常。
-- Clock 有頻率，不代表 amplitude、common-mode、jitter 或 SSC 正確。
-- Reset pulse 看得到，不代表所有下游裝置都收到相同 pulse width。
-- 探棒接地線過長可能產生假 ringing；需先排除量測方法造成的現象。
-
-## 10.9 Clock／Power／Reset Bring-up 系統化流程
-
-### 10.9.1 階段 0：建立可追蹤基準
+### 10.10.1 階段 0：建立可追蹤基準
 
 - 固定 schematic、power tree、clock tree、BOM 與 Board Revision。
 - 固定 BIOS、EC、BMC、CPLD、VR／PMIC firmware 與 silicon package。
@@ -535,7 +710,7 @@ Checkpoint 應具備：
 - 保存參考板正常波形、register dump、serial log 與完整版本資訊。
 - 確認測點與安全量測方式。
 
-### 10.9.2 階段 1：Standby 與 G3 路徑
+### 10.10.2 階段 1：Standby 與 G3 路徑
 
 - AC 插入後 Standby Rail 的 ramp、Power Good 與穩態。
 - EC／BMC／CPLD reset release 與 firmware 啟動。
@@ -544,7 +719,7 @@ Checkpoint 應具備：
 
 出口條件：standby domain 可重複進入穩定狀態，且 fault／reset cause 可讀。
 
-### 10.9.3 階段 2：Main Rail Sequence
+### 10.10.3 階段 2：Main Rail Sequence
 
 - Enable 的來源、順序與相對延遲。
 - 每條 rail 的 ramp、overshoot、settling 與 Power Good。
@@ -553,7 +728,7 @@ Checkpoint 應具備：
 
 出口條件：多次 AC Cycle／Power Cycle 均能進入穩定 Main Power Good，無 fault latch。
 
-### 10.9.4 階段 3：Clock 與 PLL
+### 10.10.4 階段 3：Clock 與 PLL
 
 - 必要 clock 是否在 reset release 前穩定。
 - Clock generator profile、output mapping 與 Board population 一致。
@@ -562,7 +737,7 @@ Checkpoint 應具備：
 
 出口條件：必要 clock 在規格時間內有效，且波形與 status 互相支持。
 
-### 10.9.5 階段 4：Reset Tree
+### 10.10.5 階段 4：Reset Tree
 
 - RSMRST#、PLTRST#、SYS_RST# 與裝置 reset 的來源及 fan-out。
 - Reset deassert 與 Power Good／Clock Stable 的相對時間。
@@ -571,7 +746,7 @@ Checkpoint 應具備：
 
 出口條件：所有必要 reset 依規格解除，reset cause 與實際觸發一致。
 
-### 10.9.6 階段 5：Firmware 與裝置導入
+### 10.10.6 階段 5：Firmware 與裝置導入
 
 建議順序：
 
@@ -585,7 +760,7 @@ Checkpoint 應具備：
 
 每次只加入一組可觀測功能，並保留上一個可用版本。
 
-### 10.9.7 暫時性 Workaround
+### 10.10.7 暫時性 Workaround
 
 Bring-up 初期可能以延長 delay、重試、固定 clock profile 或停用裝置暫時收斂問題。所有 workaround 應：
 
@@ -602,7 +777,7 @@ Bring-up 初期可能以延長 delay、重試、固定 clock profile 或停用�
 // Remove after Board Fab.C and Silicon B0 validation.
 ```
 
-### 10.9.8 收斂順序
+### 10.10.8 收斂順序
 
 ```text
 版本與量測基準
@@ -616,81 +791,6 @@ Bring-up 初期可能以延長 delay、重試、固定 clock profile 或停用�
   → Update／Recovery／Security
   → 全 SKU／Fab／Stepping／溫度回歸
 ```
-
-## 10.10 常見問題與排查
-
-### 10.10.1 完全無反應
-
-| 首要觀測 | 可能方向 | 下一步 |
-|---|---|---|
-| AC input／Standby Rail | PSU、fuse、hot-swap、standby VR | 量測輸入與 Standby PG |
-| EC／BMC／CPLD reset | 控制器未啟動 | 確認 clock、boot flash、reset |
-| Power button／wake | 輸入極性、debounce、狀態機 | 邏輯分析儀與 controller log |
-| Main rail enable | sequence 未開始或被 fault 阻止 | 查 fault latch、state register |
-
-### 10.10.2 有上電但無 POST
-
-| 首要觀測 | 可能方向 | 下一步 |
-|---|---|---|
-| Main Power Good | Rail 未穩或 aggregate PG 未成立 | 同步量測 rail 與 PG |
-| BCLK／必要 clock | Clock generator profile／enable／起振 | Scope＋clock status |
-| RSMRST#／PLTRST# | 前置條件不足、reset gating | 對齊 clock／PG／reset 波形 |
-| SPI activity | CPU 未離開 reset或 Boot Flash 路徑 | Probe CS#／CLK／data、檢查 strap |
-| POST／GPIO checkpoint | 停在 SEC／PEI | 對照 checkpoint 版本與 serial log |
-
-### 10.10.3 偶發 Cold Boot 失敗
-
-- Rail ramp、Power Good glitch 或 discharge 不一致。
-- Crystal／PLL 在低溫或特定 AC off time 下起振較慢。
-- Board ID／strap sampling 靠近臨界時間。
-- EEPROM／CPLD profile 尚未 ready。
-- Timeout 太貼近典型值，未涵蓋規格最大值。
-- 記憶體 training、VR transient 或負載組合造成 margin 問題。
-
-排查時應用示波器的 segmented memory、persistence 或 sequence mode 擷取多次開機，不能只比較單次成功與單次失敗。
-
-### 10.10.4 Warm Reset 失敗
-
-- Reset domain 不足，device／retimer／controller 保留舊狀態。
-- Bus master／DMA 未停止。
-- Clock gating／CLKREQ# 狀態與下一次初始化假設不一致。
-- Watchdog 或 reset cause 讀取／清除順序錯誤。
-- SMM／BMC／CPLD 同時觸發不同 reset。
-
-### 10.10.5 AC Cycle 才能復原
-
-- Standby powered latch 未被 Power Cycle 清除。
-- CPLD／EC／BMC state machine 卡在 fault state。
-- VR／PMIC fault 需要移除輸入電源。
-- RTC／resume domain register 未被一般 reset 清除。
-- 裝置 AUX power 保留狀態。
-
-### 10.10.6 PCIe Link 不穩
-
-- Reference clock mode 與 endpoint／retimer policy 不一致。
-- PERST# 與 reference clock／power 的相對時間不符。
-- CLKREQ# wiring、pull-up 或 clock buffer gating 錯誤。
-- Retimer firmware／reset／power／clock sequence 不完整。
-- Bifurcation、lane reversal、link speed policy 與 board wiring 不一致。
-
-### 10.10.7 Sleep／Wake 失敗
-
-- SLP_Sx# 對 rail 的 mapping 錯誤。
-- Wake source 沒有供電或被 reset。
-- ACPI table 宣告與硬體 wiring 不一致。
-- EC／BMC／CPLD 未辨識 state transition。
-- Resume clock、RSMRST# 或 context restore 順序錯誤。
-
-### 10.10.8 通用排查流程
-
-1. 固定可重現條件與版本。
-2. 判定 CPU 是否曾開始執行。
-3. 由 Standby Rail 往 Main Rail、Clock、Reset、SPI／POST 逐層量測。
-4. 保存 reset／power／fault raw status，避免先清除。
-5. 對齊 scope、CPLD／BMC log、POST code 與 BIOS serial log 的時間軸。
-6. 與參考板或最近可用版本做單一變因比較。
-7. 修正後覆蓋 Cold／Warm／Global／Power／AC Cycle。
-8. 將 workaround、量測證據與回歸結果關聯到同一 issue。
 
 ## 10.11 驗證與測試矩陣
 
@@ -795,6 +895,8 @@ Bring-up 初期可能以延長 delay、重試、固定 clock profile 或停用�
 - [ ] 更新中斷電與跨版本回復已驗證。
 
 ## 10.14 本章三個關鍵問題
+
+第 6 章使用「歸屬、流程、驗證」來討論程式架構；本章跨越硬體與韌體邊界，因此改以「狀態、時序、收斂」作為檢查框架。兩者目的相同，都是讓責任、資料與證據可追蹤。
 
 1. **電源是否真的穩定？** 不能只看 Power Good，還要確認 rail 的 ramp、overshoot、settling、負載變化與 fault latch。
 2. **Clock 與 Reset 是否在正確時間有效？** 必須同時檢查來源、PLL／clock status、板端波形，以及 reset 的 domain、pulse width 與解除條件。
